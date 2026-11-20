@@ -141,7 +141,8 @@ class UltraAccessibilityService : AccessibilityService() {
             putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, textToEnter)
         }
         val ok = target.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
-        val label = target.viewIdResourceName ?: target.hintText?.toString() ?: "text field"
+        val hint = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) target.hintText?.toString() else null
+        val label = target.viewIdResourceName ?: hint ?: "text field"
         return if (ok) {
             AccessibilityActionResult(true, "Entered text into $label.", label)
         } else {
@@ -227,7 +228,8 @@ class UltraAccessibilityService : AccessibilityService() {
         val textMatch = q.isNotBlank() && (
             node.text?.toString()?.contains(q, ignoreCase = true) == true ||
                 node.contentDescription?.toString()?.contains(q, ignoreCase = true) == true ||
-                node.hintText?.toString()?.contains(q, ignoreCase = true) == true
+                (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+                    node.hintText?.toString()?.contains(q, ignoreCase = true) == true)
             )
         if (idMatch || textMatch) return node
         for (i in 0 until node.childCount) {

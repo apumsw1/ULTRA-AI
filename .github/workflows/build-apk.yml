@@ -22,6 +22,11 @@ jobs:
           distribution: temurin
           java-version: '21'
 
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
+
       - name: Accept Android SDK Licenses
         run: |
           if [ -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
@@ -54,10 +59,10 @@ jobs:
           fi
 
       - name: Run Unit Tests
-        run: gradle --no-daemon testDebugUnitTest
+        run: gradle --no-daemon testDebugUnitTest --stacktrace --console=plain
 
       - name: Build Debug APK
-        run: gradle --no-daemon assembleDebug
+        run: gradle --no-daemon assembleDebug --stacktrace --console=plain
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
@@ -65,3 +70,4 @@ jobs:
           name: ULTRA-AI-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
+          retention-days: 7

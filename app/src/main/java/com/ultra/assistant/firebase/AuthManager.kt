@@ -18,7 +18,6 @@ import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseUser
 import com.google.firebase.auth.GoogleAuthProvider
 import com.google.firebase.auth.auth
-import com.ultra.assistant.R
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.channels.awaitClose
@@ -38,6 +37,16 @@ fun FirebaseAuth.authStateFlow(): Flow<FirebaseUser?> = callbackFlow {
     awaitClose { removeAuthStateListener(listener) }
 }
 
+private fun resolveDefaultWebClientId(context: Context): String? {
+    val resId = context.resources.getIdentifier(
+        "default_web_client_id",
+        "string",
+        context.packageName
+    )
+    if (resId == 0) return null
+    return runCatching { context.getString(resId) }.getOrNull()?.takeIf { it.isNotBlank() }
+}
+
 fun attemptAutoSignIn(
     context: Context,
     credentialManager: CredentialManager,
@@ -49,9 +58,8 @@ fun attemptAutoSignIn(
         onAuthSuccess()
         return
     }
-    val clientId = try {
-        context.getString(R.string.default_web_client_id)
-    } catch (_: Exception) {
+    val clientId = resolveDefaultWebClientId(context)
+    if (clientId == null) {
         onUnauthenticated()
         return
     }
@@ -91,10 +99,9 @@ fun onGoogleSignInClicked(
     scope: CoroutineScope,
     onAuthCancelled: () -> Unit = {}
 ) {
-    val clientId = try {
-        context.getString(R.string.default_web_client_id)
-    } catch (_: Exception) {
-        onAuthError("Google Sign-In configuration missing: default_web_client_id not found")
+    val clientId = resolveDefaultWebClientId(context)
+    if (clientId == null) {
+        onAuthError("Google Sign-In configuration missing: google-services.json is required for Web Client ID.")
         return
     }
     val signInOption = GetSignInWithGoogleOption.Builder(serverClientId = clientId).build()

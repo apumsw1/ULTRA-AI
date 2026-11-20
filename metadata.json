@@ -1,0 +1,6 @@
+{
+  "name": "ULTRA AI",
+  "description": "JARVIS-style Android AI agent system with voice assistant, tool execution, Accessibility control, notification & SMS integration, memory, and Cloudflare Workers backend.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

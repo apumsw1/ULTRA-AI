@@ -1,0 +1,495 @@
+package com.ultra.assistant
+
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.Bundle
+import android.widget.Toast
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Apps
+import androidx.compose.material.icons.filled.AutoMode
+import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationRail
+import androidx.compose.material3.NavigationRailItem
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
+import androidx.credentials.CredentialManager
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.Companion.APPLICATION_KEY
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.currentBackStackEntryAsState
+import androidx.navigation.compose.rememberNavController
+import com.google.firebase.Firebase
+import com.google.firebase.auth.auth
+import com.ultra.assistant.brain.AgentManager
+import com.ultra.assistant.data.LocalSettingsRepository
+import com.ultra.assistant.firebase.CloudSyncRepository
+import com.ultra.assistant.firebase.authStateFlow
+import com.ultra.assistant.firebase.configureAppCheck
+import com.ultra.assistant.firebase.signOut
+import com.ultra.assistant.memory.MemoryManager
+import com.ultra.assistant.permissions.PermissionManager
+import com.ultra.assistant.tools.PermissionRequirement
+import com.ultra.assistant.ui.UltraViewModel
+import com.ultra.assistant.ui.apps.AppManagerScreen
+import com.ultra.assistant.ui.auth.AuthScreen
+import com.ultra.assistant.ui.automation.AutomationScreen
+import com.ultra.assistant.ui.components.SensitiveConfirmationDialog
+import com.ultra.assistant.ui.home.HomeScreen
+import com.ultra.assistant.ui.settings.SettingsScreen
+import com.ultra.assistant.ui.theme.UltraTheme
+import com.ultra.assistant.ui.tools.ToolsAndControlScreen
+import com.ultra.assistant.ui.voice.VoiceScreen
+
+object UltraRoutes {
+    const val HOME = "home"
+    const val VOICE = "voice"
+    const val CONTROL = "control"
+    const val AUTOMATION = "automation"
+    const val APPS = "apps"
+    const val SETTINGS = "settings"
+}
+
+private data class NavTab(
+    val route: String,
+    val label: String,
+    val icon: ImageVector
+)
+
+private val primaryTabs = listOf(
+    NavTab(UltraRoutes.HOME, "Home", Icons.Default.Home),
+    NavTab(UltraRoutes.VOICE, "Voice", Icons.Default.Mic),
+    NavTab(UltraRoutes.CONTROL, "Control", Icons.Default.Build),
+    NavTab(UltraRoutes.AUTOMATION, "Auto", Icons.Default.AutoMode),
+    NavTab(UltraRoutes.APPS, "Apps", Icons.Default.Apps),
+    NavTab(UltraRoutes.SETTINGS, "Settings", Icons.Default.Settings)
+)
+
+class MainActivity : ComponentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        // Mandatory: configure App Check with launch intent before any Compose UI or ViewModels
+        configureAppCheck(this, intent)
+        enableEdgeToEdge()
+        setContent {
+            UltraTheme {
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = MaterialTheme.colorScheme.background
+                ) {
+                    UltraAppRoot()
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun UltraAppRoot() {
+    val auth = Firebase.auth
+    val currentUser by auth.authStateFlow().collectAsStateWithLifecycle(initialValue = auth.currentUser)
+    val user = currentUser
+    if (user == null) {
+        AuthScreen(onAuthSuccess = {})
+    } else {
+        key(user.uid) {
+            UltraAuthenticatedShell(
+                currentUserId = user.uid,
+                userEmail = user.email
+            )
+        }
+    }
+}
+
+@Composable
+fun UltraAuthenticatedShell(
+    currentUserId: String,
+    userEmail: String?
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val credentialManager = remember(context) { CredentialManager.create(context) }
+
+    val viewModel: UltraViewModel = viewModel(
+        key = currentUserId,
+        factory = viewModelFactory {
+            initializer {
+                val app = checkNotNull(this[APPLICATION_KEY])
+                val settingsRepo = LocalSettingsRepository(app)
+                val cloudRepo = CloudSyncRepository(app)
+                val memoryMgr = MemoryManager(app, settingsRepo, cloudRepo)
+                val agentMgr = AgentManager(app, memoryMgr, settingsRepo)
+                UltraViewModel(
+                    appContext = app.applicationContext,
+                    currentUserId = currentUserId,
+                    settingsRepository = settingsRepo,
+                    cloudSyncRepository = cloudRepo,
+                    memoryManager = memoryMgr,
+                    agentManager = agentMgr
+                )
+            }
+        }
+    )
+
+    val settings by viewModel.settings.collectAsStateWithLifecycle()
+    val memories by viewModel.memories.collectAsStateWithLifecycle()
+    val conversations by viewModel.conversations.collectAsStateWithLifecycle()
+    val auditLogs by viewModel.auditLogs.collectAsStateWithLifecycle()
+    val automationRules by viewModel.automationRules.collectAsStateWithLifecycle()
+    val latestReport by viewModel.latestAgentReport.collectAsStateWithLifecycle()
+    val pendingConfirmation by viewModel.pendingConfirmation.collectAsStateWithLifecycle()
+    val notifications by viewModel.notifications.collectAsStateWithLifecycle()
+    val screenSnapshot by viewModel.screenSnapshot.collectAsStateWithLifecycle()
+    val isBusy by viewModel.isAgentBusy.collectAsStateWithLifecycle()
+    val installedApps by viewModel.installedApps.collectAsStateWithLifecycle()
+    val permissions by viewModel.permissionSnapshot.collectAsStateWithLifecycle()
+    val pendingReminders by viewModel.pendingReminders.collectAsStateWithLifecycle()
+    val statusBanner by viewModel.statusBanner.collectAsStateWithLifecycle()
+
+    var isServiceRunning by remember { mutableStateOf(VoiceAssistantService.isRunning) }
+    var voiceState by remember { mutableStateOf(VoiceAssistantService.currentState) }
+    var voiceLevel by remember { mutableFloatStateOf(0f) }
+    var partialTranscript by remember { mutableStateOf("") }
+    var lastRecognizedText by remember { mutableStateOf("") }
+    var lastAgentReply by remember { mutableStateOf("") }
+
+    val snackbarHostState = remember { SnackbarHostState() }
+    LaunchedEffect(statusBanner) {
+        val msg = statusBanner
+        if (!msg.isNullOrBlank()) {
+            snackbarHostState.showSnackbar(msg)
+            viewModel.clearStatusBanner()
+        }
+    }
+
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                isServiceRunning = VoiceAssistantService.isRunning
+                voiceState = VoiceAssistantService.currentState
+                viewModel.refreshSystemState()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    DisposableEffect(context) {
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(ctx: Context?, intent: Intent?) {
+                when (intent?.action) {
+                    VoiceAssistantService.BROADCAST_VOICE_STATE -> {
+                        voiceState = intent.getStringExtra("state") ?: "IDLE"
+                        isServiceRunning = VoiceAssistantService.isRunning
+                    }
+                    VoiceAssistantService.BROADCAST_VOICE_PARTIAL -> {
+                        partialTranscript = intent.getStringExtra("text").orEmpty()
+                    }
+                    VoiceAssistantService.BROADCAST_VOICE_TEXT -> {
+                        partialTranscript = ""
+                        lastRecognizedText = intent.getStringExtra("text").orEmpty()
+                    }
+                    VoiceAssistantService.BROADCAST_VOICE_LEVEL -> {
+                        voiceLevel = intent.getFloatExtra("level", 0f)
+                    }
+                    VoiceAssistantService.BROADCAST_AGENT_REPLY -> {
+                        lastAgentReply = intent.getStringExtra("reply").orEmpty()
+                    }
+                }
+            }
+        }
+        val filter = IntentFilter().apply {
+            addAction(VoiceAssistantService.BROADCAST_VOICE_STATE)
+            addAction(VoiceAssistantService.BROADCAST_VOICE_PARTIAL)
+            addAction(VoiceAssistantService.BROADCAST_VOICE_TEXT)
+            addAction(VoiceAssistantService.BROADCAST_VOICE_LEVEL)
+            addAction(VoiceAssistantService.BROADCAST_AGENT_REPLY)
+        }
+        ContextCompat.registerReceiver(context, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
+        onDispose { runCatching { context.unregisterReceiver(receiver) } }
+    }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { results ->
+        viewModel.refreshSystemState()
+        if (results.values.all { it }) {
+            ContextCompat.startForegroundService(context, Intent(context, VoiceAssistantService::class.java))
+            isServiceRunning = true
+            Toast.makeText(context, "ULTRA AI voice active", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(context, "Microphone permission is required for voice control", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    val startVoiceAssistant = {
+        val missing = PermissionManager.missing(context)
+        if (missing.isNotEmpty()) {
+            permissionLauncher.launch(missing.toTypedArray())
+        } else {
+            ContextCompat.startForegroundService(context, Intent(context, VoiceAssistantService::class.java))
+            isServiceRunning = true
+        }
+    }
+
+    val stopVoiceAssistant = {
+        context.startService(Intent(context, VoiceAssistantService::class.java).setAction(VoiceAssistantService.ACTION_STOP))
+        isServiceRunning = false
+        voiceState = "IDLE"
+    }
+
+    val interruptVoiceAssistant = {
+        if (VoiceAssistantService.isRunning) {
+            context.startService(Intent(context, VoiceAssistantService::class.java).setAction(VoiceAssistantService.ACTION_INTERRUPT))
+        }
+    }
+
+    val enableFloatingDot = {
+        if (!PermissionManager.hasOverlay(context)) {
+            context.startActivity(PermissionManager.overlaySettingsIntent(context))
+        } else {
+            ContextCompat.startForegroundService(
+                context,
+                Intent(context, VoiceAssistantService::class.java).setAction(VoiceAssistantService.ACTION_SHOW_DOT)
+            )
+            Toast.makeText(context, "Floating U overlay enabled", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    val fixMissingPermission: (PermissionRequirement) -> Unit = { req ->
+        when (req) {
+            PermissionRequirement.ACCESSIBILITY -> context.startActivity(PermissionManager.accessibilitySettingsIntent())
+            PermissionRequirement.NOTIFICATION_LISTENER -> context.startActivity(PermissionManager.notificationListenerSettingsIntent())
+            PermissionRequirement.OVERLAY -> context.startActivity(PermissionManager.overlaySettingsIntent(context))
+            PermissionRequirement.DEVICE_ADMIN -> context.startActivity(PermissionManager.deviceAdminActivateIntent(context))
+            PermissionRequirement.MICROPHONE, PermissionRequirement.POST_NOTIFICATIONS -> {
+                val missing = PermissionManager.missing(context)
+                if (missing.isNotEmpty()) permissionLauncher.launch(missing.toTypedArray())
+                else context.startActivity(PermissionManager.appDetailsIntent(context))
+            }
+            PermissionRequirement.DEFAULT_SMS_APP -> context.startActivity(PermissionManager.appDetailsIntent(context))
+        }
+    }
+
+    pendingConfirmation?.let { pending ->
+        SensitiveConfirmationDialog(
+            confirmation = pending,
+            onApprove = { viewModel.resolveConfirmation(true) },
+            onDeny = { viewModel.resolveConfirmation(false) }
+        )
+    }
+
+    val navController = rememberNavController()
+    val backStackEntry by navController.currentBackStackEntryAsState()
+    val currentRoute = backStackEntry?.destination?.route ?: UltraRoutes.HOME
+
+    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        val useNavRail = maxWidth >= 600.dp
+
+        Scaffold(
+            snackbarHost = { SnackbarHost(snackbarHostState) },
+            contentWindowInsets = WindowInsets.safeDrawing,
+            bottomBar = {
+                if (!useNavRail) {
+                    NavigationBar(
+                        modifier = Modifier.windowInsetsPadding(WindowInsets.navigationBars)
+                    ) {
+                        primaryTabs.forEach { tab ->
+                            NavigationBarItem(
+                                selected = currentRoute == tab.route,
+                                onClick = {
+                                    navController.navigate(tab.route) {
+                                        popUpTo(UltraRoutes.HOME) { saveState = true }
+                                        launchSingleTop = true
+                                        restoreState = true
+                                    }
+                                },
+                                icon = { Icon(tab.icon, contentDescription = tab.label) },
+                                label = { Text(tab.label, maxLines = 1) }
+                            )
+                        }
+                    }
+                }
+            }
+        ) { innerPadding ->
+        Row(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+        ) {
+            if (useNavRail) {
+                NavigationRail {
+                    primaryTabs.forEach { tab ->
+                        NavigationRailItem(
+                            selected = currentRoute == tab.route,
+                            onClick = {
+                                navController.navigate(tab.route) {
+                                    popUpTo(UltraRoutes.HOME) { saveState = true }
+                                    launchSingleTop = true
+                                    restoreState = true
+                                }
+                            },
+                            icon = { Icon(tab.icon, contentDescription = tab.label) },
+                            label = { Text(tab.label) }
+                        )
+                    }
+                }
+            }
+
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.TopCenter
+            ) {
+                NavHost(
+                    navController = navController,
+                    startDestination = UltraRoutes.HOME
+                ) {
+                    composable(UltraRoutes.HOME) {
+                        HomeScreen(
+                            isServiceRunning = isServiceRunning,
+                            voiceState = voiceState,
+                            settings = settings,
+                            permissions = permissions,
+                            isBusy = isBusy,
+                            latestReport = latestReport,
+                            conversations = conversations,
+                            onStartAssistant = startVoiceAssistant,
+                            onStopAssistant = stopVoiceAssistant,
+                            onEnableFloatingDot = enableFloatingDot,
+                            onSubmitCommand = viewModel::submitCommand,
+                            onFixPermission = fixMissingPermission
+                        )
+                    }
+                    composable(UltraRoutes.VOICE) {
+                        VoiceScreen(
+                            isServiceRunning = isServiceRunning,
+                            voiceState = voiceState,
+                            voiceLevel = voiceLevel,
+                            partialTranscript = partialTranscript,
+                            lastRecognizedText = lastRecognizedText,
+                            lastAgentReply = lastAgentReply,
+                            settings = settings,
+                            onStartVoice = startVoiceAssistant,
+                            onStopVoice = stopVoiceAssistant,
+                            onInterruptVoice = interruptVoiceAssistant,
+                            onSelectLanguage = viewModel::updateLanguage,
+                            onUpdateWakePhrase = viewModel::updateWakePhrase,
+                            onUpdateVoiceTuning = viewModel::updateVoiceTuning
+                        )
+                    }
+                    composable(UltraRoutes.CONTROL) {
+                        ToolsAndControlScreen(
+                            tools = viewModel.registeredTools,
+                            permissions = permissions,
+                            screenSnapshot = screenSnapshot,
+                            notifications = notifications,
+                            smsCaps = viewModel.smsCapabilities(),
+                            onRunToolTest = viewModel::runToolDirectly,
+                            onInspectScreen = viewModel::inspectCurrentScreen,
+                            onOpenAccessibilitySettings = { context.startActivity(PermissionManager.accessibilitySettingsIntent()) },
+                            onOpenNotificationSettings = { context.startActivity(PermissionManager.notificationListenerSettingsIntent()) },
+                            onClearNotifications = viewModel::clearNotifications,
+                            onPrepareSmsDraft = viewModel::prepareSmsDraft
+                        )
+                    }
+                    composable(UltraRoutes.AUTOMATION) {
+                        AutomationScreen(
+                            rules = automationRules,
+                            pendingReminders = pendingReminders,
+                            auditLogs = auditLogs,
+                            onScheduleReminder = viewModel::scheduleReminder,
+                            onCancelReminder = viewModel::cancelReminder,
+                            onAddRule = viewModel::addAutomationRule,
+                            onToggleRule = viewModel::toggleAutomationRule,
+                            onDeleteRule = viewModel::deleteAutomationRule,
+                            onClearAuditLogs = viewModel::clearAuditLogs
+                        )
+                    }
+                    composable(UltraRoutes.APPS) {
+                        AppManagerScreen(
+                            apps = installedApps,
+                            onLaunchApp = viewModel::launchApp,
+                            onOpenAppInfo = viewModel::openAppInfo
+                        )
+                    }
+                    composable(UltraRoutes.SETTINGS) {
+                        SettingsScreen(
+                            userEmail = userEmail,
+                            settings = settings,
+                            permissions = permissions,
+                            deviceInfo = viewModel.deviceInfo(),
+                            deviceAdminExplanation = viewModel.deviceAdminExplanation(),
+                            memories = memories,
+                            onUpdateAiConfig = viewModel::updateAiConfig,
+                            onUpdatePrivacyConfig = viewModel::updatePrivacyConfig,
+                            onSaveMemory = viewModel::saveMemoryManual,
+                            onDeleteMemory = viewModel::deleteMemory,
+                            onClearAllMemories = viewModel::clearAllMemories,
+                            onOpenMicAppSettings = { context.startActivity(PermissionManager.appDetailsIntent(context)) },
+                            onOpenOverlaySettings = { context.startActivity(PermissionManager.overlaySettingsIntent(context)) },
+                            onOpenAccessibilitySettings = { context.startActivity(PermissionManager.accessibilitySettingsIntent()) },
+                            onOpenNotificationSettings = { context.startActivity(PermissionManager.notificationListenerSettingsIntent()) },
+                            onOpenBatterySettings = { context.startActivity(PermissionManager.batteryOptimizationSettingsIntent()) },
+                            onActivateDeviceAdmin = { context.startActivity(PermissionManager.deviceAdminActivateIntent(context)) },
+                            onOpenSecuritySettings = { context.startActivity(PermissionManager.securitySettingsIntent()) },
+                            onSignOut = {
+                                if (VoiceAssistantService.isRunning) stopVoiceAssistant()
+                                signOut(credentialManager, scope)
+                            }
+                        )
+                    }
+                }
+            }
+        }
+        }
+    }
+}

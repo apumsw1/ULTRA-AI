@@ -1,0 +1,152 @@
+{
+  "entities": {
+    "SyncedMemory": {
+      "title": "SyncedMemory",
+      "description": "User-approved memory item synced from ULTRA AI local storage (privacy-filtered and optionally client-encrypted).",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Authenticated owner Firebase UID"
+        },
+        "category": {
+          "type": "string",
+          "enum": ["PREFERENCE", "CONTEXT", "CONVERSATION", "KNOWLEDGE"],
+          "description": "Memory category"
+        },
+        "title": {
+          "type": "string",
+          "description": "Short label for the memory entry"
+        },
+        "content": {
+          "type": "string",
+          "description": "Plaintext or AES-GCM encrypted Base64 payload"
+        },
+        "encrypted": {
+          "type": "boolean",
+          "description": "Whether content is client-side AES-GCM encrypted"
+        },
+        "expiresAtMillis": {
+          "type": "integer",
+          "description": "Expiration epoch millis (0 means non-expiring)"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp written with FieldValue.serverTimestamp()"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp written with FieldValue.serverTimestamp()"
+        }
+      },
+      "required": ["userId", "category", "title", "content", "encrypted", "expiresAtMillis", "createdAt", "updatedAt"]
+    },
+    "SyncedAutomation": {
+      "title": "SyncedAutomation",
+      "description": "User-approved automation workflow or scheduled reminder rule.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Authenticated owner Firebase UID"
+        },
+        "name": {
+          "type": "string",
+          "description": "Rule name"
+        },
+        "description": {
+          "type": "string",
+          "description": "Human-readable workflow description"
+        },
+        "triggerType": {
+          "type": "string",
+          "enum": ["VOICE_PHRASE", "SCHEDULED_REMINDER", "MANUAL_WORKFLOW"],
+          "description": "How the automation is triggered"
+        },
+        "actionTool": {
+          "type": "string",
+          "description": "Registered tool identifier to invoke"
+        },
+        "actionArgsJson": {
+          "type": "string",
+          "description": "Serialized JSON arguments for the tool"
+        },
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether the automation is currently enabled"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp written with FieldValue.serverTimestamp()"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp written with FieldValue.serverTimestamp()"
+        }
+      },
+      "required": ["userId", "name", "description", "triggerType", "actionTool", "actionArgsJson", "enabled", "createdAt", "updatedAt"]
+    },
+    "SyncedAuditLog": {
+      "title": "SyncedAuditLog",
+      "description": "Verified tool execution audit log entry.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Authenticated owner Firebase UID"
+        },
+        "toolId": {
+          "type": "string",
+          "description": "Tool identifier"
+        },
+        "riskLevel": {
+          "type": "string",
+          "enum": ["LOW", "MEDIUM", "HIGH"],
+          "description": "Tool risk classification"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["SUCCESS", "FAILED", "DENIED", "AWAITING_CONFIRMATION"],
+          "description": "Execution status"
+        },
+        "summary": {
+          "type": "string",
+          "description": "Sanitized action outcome summary without credentials"
+        },
+        "verified": {
+          "type": "boolean",
+          "description": "Whether ResultVerifier confirmed success"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp written with FieldValue.serverTimestamp()"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp written with FieldValue.serverTimestamp()"
+        }
+      },
+      "required": ["userId", "toolId", "riskLevel", "status", "summary", "verified", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}/memories/{memoryId}": {
+      "schema": { "$ref": "#/entities/SyncedMemory" },
+      "description": "User-scoped synced AI memory entries"
+    },
+    "/users/{userId}/automations/{ruleId}": {
+      "schema": { "$ref": "#/entities/SyncedAutomation" },
+      "description": "User-scoped approved automation workflows"
+    },
+    "/users/{userId}/audit_logs/{logId}": {
+      "schema": { "$ref": "#/entities/SyncedAuditLog" },
+      "description": "User-scoped tool execution audit trail"
+    }
+  }
+}

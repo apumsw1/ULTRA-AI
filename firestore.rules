@@ -1,0 +1,111 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidMemory(data, userId) {
+      return data.userId is string && data.userId == userId &&
+             data.category in ['PREFERENCE', 'CONTEXT', 'CONVERSATION', 'KNOWLEDGE'] &&
+             data.title is string && data.title.size() >= 1 && data.title.size() <= 120 &&
+             data.content is string && data.content.size() >= 1 && data.content.size() <= 2000 &&
+             data.encrypted is bool &&
+             data.expiresAtMillis is int && data.expiresAtMillis >= 0;
+    }
+
+    function isValidAutomation(data, userId) {
+      return data.userId is string && data.userId == userId &&
+             data.name is string && data.name.size() >= 1 && data.name.size() <= 100 &&
+             data.description is string && data.description.size() >= 1 && data.description.size() <= 500 &&
+             data.triggerType in ['VOICE_PHRASE', 'SCHEDULED_REMINDER', 'MANUAL_WORKFLOW'] &&
+             data.actionTool is string && data.actionTool.size() >= 1 && data.actionTool.size() <= 64 &&
+             data.actionArgsJson is string && data.actionArgsJson.size() <= 1000 &&
+             data.enabled is bool;
+    }
+
+    function isValidAuditLog(data, userId) {
+      return data.userId is string && data.userId == userId &&
+             data.toolId is string && data.toolId.size() >= 1 && data.toolId.size() <= 64 &&
+             data.riskLevel in ['LOW', 'MEDIUM', 'HIGH'] &&
+             data.status in ['SUCCESS', 'FAILED', 'DENIED', 'AWAITING_CONFIRMATION'] &&
+             data.summary is string && data.summary.size() >= 1 && data.summary.size() <= 500 &&
+             data.verified is bool;
+    }
+
+    match /users/{userId}/memories/{memoryId} {
+      allow get: if isOwner(userId) && isValidId(memoryId);
+      allow list: if isOwner(userId);
+      allow create: if isOwner(userId) &&
+                       isValidId(memoryId) &&
+                       incoming().keys().hasAll(['userId', 'category', 'title', 'content', 'encrypted', 'expiresAtMillis', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'category', 'title', 'content', 'encrypted', 'expiresAtMillis', 'createdAt', 'updatedAt']) &&
+                       incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                       isValidMemory(incoming(), userId);
+      allow update: if isOwner(userId) &&
+                       isValidId(memoryId) &&
+                       isValidMemory(incoming(), userId) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['category', 'title', 'content', 'encrypted', 'expiresAtMillis', 'updatedAt']);
+      allow delete: if isOwner(userId) && isValidId(memoryId);
+    }
+
+    match /users/{userId}/automations/{ruleId} {
+      allow get: if isOwner(userId) && isValidId(ruleId);
+      allow list: if isOwner(userId);
+      allow create: if isOwner(userId) &&
+                       isValidId(ruleId) &&
+                       incoming().keys().hasAll(['userId', 'name', 'description', 'triggerType', 'actionTool', 'actionArgsJson', 'enabled', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'name', 'description', 'triggerType', 'actionTool', 'actionArgsJson', 'enabled', 'createdAt', 'updatedAt']) &&
+                       incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                       isValidAutomation(incoming(), userId);
+      allow update: if isOwner(userId) &&
+                       isValidId(ruleId) &&
+                       isValidAutomation(incoming(), userId) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['name', 'description', 'triggerType', 'actionTool', 'actionArgsJson', 'enabled', 'updatedAt']);
+      allow delete: if isOwner(userId) && isValidId(ruleId);
+    }
+
+    match /users/{userId}/audit_logs/{logId} {
+      allow get: if isOwner(userId) && isValidId(logId);
+      allow list: if isOwner(userId);
+      allow create: if isOwner(userId) &&
+                       isValidId(logId) &&
+                       incoming().keys().hasAll(['userId', 'toolId', 'riskLevel', 'status', 'summary', 'verified', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'toolId', 'riskLevel', 'status', 'summary', 'verified', 'createdAt', 'updatedAt']) &&
+                       incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                       isValidAuditLog(incoming(), userId);
+      allow update: if false;
+      allow delete: if isOwner(userId) && isValidId(logId);
+    }
+  }
+}

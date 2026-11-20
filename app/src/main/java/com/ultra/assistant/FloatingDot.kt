@@ -20,6 +20,7 @@ class FloatingDot(private val context: Context) {
         if (dot != null) return
         val v = TextView(context).apply {
             text = "U"
+            contentDescription = "Open ULTRA AI"
             textSize = 19f
             gravity = Gravity.CENTER
             setTextColor(0xFFFFFFFF.toInt())
@@ -52,7 +53,12 @@ class FloatingDot(private val context: Context) {
         var startX = 0
         var startY = 0
         var moved = false
-        v.setOnTouchListener { _, e ->
+        v.setOnClickListener {
+            context.startActivity(
+                Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+        }
+        v.setOnTouchListener { view, e ->
             when (e.action) {
                 MotionEvent.ACTION_DOWN -> {
                     downX = e.rawX
@@ -68,14 +74,12 @@ class FloatingDot(private val context: Context) {
                     if (abs(dx) + abs(dy) > 8) moved = true
                     p.x = startX - dx
                     p.y = startY + dy
-                    runCatching { wm.updateViewLayout(v, p) }
+                    runCatching { wm.updateViewLayout(view, p) }
                     true
                 }
                 MotionEvent.ACTION_UP -> {
                     if (!moved) {
-                        context.startActivity(
-                            Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        )
+                        view.performClick()
                     }
                     true
                 }

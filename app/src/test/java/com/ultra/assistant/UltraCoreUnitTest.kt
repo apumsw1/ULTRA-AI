@@ -63,9 +63,9 @@ class UltraCoreUnitTest {
 
     @Test
     fun `language manager maps Bengali Hindi and English locales`() {
-        assertEquals(Locale("bn", "BD"), LanguageManager.locale("বাংলা"))
+        assertEquals(Locale.forLanguageTag("bn-BD"), LanguageManager.locale("বাংলা"))
         assertEquals("bn-IN", LanguageManager.speechRecognizerTag("bn"))
-        assertEquals(Locale("hi", "IN"), LanguageManager.locale("हिन्दी"))
+        assertEquals(Locale.forLanguageTag("hi-IN"), LanguageManager.locale("हिन्दी"))
         assertEquals("hi-IN", LanguageManager.speechRecognizerTag("hi"))
         assertEquals(Locale.US, LanguageManager.locale("English"))
         assertEquals("en-US", LanguageManager.speechRecognizerTag("English"))

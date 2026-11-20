@@ -163,10 +163,10 @@ fun UltraAuthenticatedShell(
         factory = viewModelFactory {
             initializer {
                 val app = checkNotNull(this[APPLICATION_KEY])
-                val settingsRepo = LocalSettingsRepository(app)
-                val cloudRepo = CloudSyncRepository(app)
-                val memoryMgr = MemoryManager(app, settingsRepo, cloudRepo)
-                val agentMgr = AgentManager(app, memoryMgr, settingsRepo)
+                val settingsRepo = UltraRuntime.settingsRepository(app)
+                val cloudRepo = UltraRuntime.cloudSyncRepository(app)
+                val memoryMgr = UltraRuntime.memoryManager(app)
+                val agentMgr = UltraRuntime.agentManager(app)
                 UltraViewModel(
                     appContext = app.applicationContext,
                     currentUserId = currentUserId,

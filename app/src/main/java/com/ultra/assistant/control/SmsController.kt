@@ -70,11 +70,15 @@ class SmsController(context: Context) {
     @Suppress("DEPRECATION")
     fun sendDirectIfAuthorized(recipient: String, body: String): SmsExecutionResult {
         val caps = capabilities()
-        if (!caps.isDefaultSmsHandler) {
+        val hasSendSms = androidx.core.content.ContextCompat.checkSelfPermission(
+            appContext,
+            android.Manifest.permission.SEND_SMS
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!caps.isDefaultSmsHandler || !hasSendSms) {
             return SmsExecutionResult(
                 success = false,
                 mode = "FAILED",
-                message = "Direct SMS sending requires ULTRA AI to be the authorized default SMS handler. Opening draft instead."
+                message = "Direct SMS sending requires ULTRA AI to be the authorized default SMS handler with SEND_SMS permission."
             )
         }
         if (recipient.isBlank() || body.isBlank()) {

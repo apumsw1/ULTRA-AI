@@ -50,7 +50,7 @@ class MemoryManager(
                 category = category,
                 title = safeTitle,
                 content = payload,
-                encrypted = settings.encryptCloudMemory,
+                encrypted = payload.startsWith("ENCv1:"),
                 expiresAtMillis = expiresAt
             ).isSuccess
         }

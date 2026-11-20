@@ -416,6 +416,31 @@ export default {
       return reply({ ok: true, id, status: "PENDING" }, 201);
     }
 
+    if (url.pathname.startsWith("/api/tasks/") && request.method === "PATCH") {
+      if (!env.DB) return reply({ ok: false, error: "D1 database (DB) is not bound" }, 503);
+      const taskId = url.pathname.slice("/api/tasks/".length).trim();
+      if (!taskId) return reply({ ok: false, error: "Task id is required" }, 400);
+      let body;
+      try {
+        body = await request.json();
+      } catch {
+        return reply({ ok: false, error: "Invalid JSON body" }, 400);
+      }
+      const nextStatus = String(body.status || "COMPLETED").toUpperCase();
+      if (!["PENDING", "RUNNING", "COMPLETED", "FAILED", "CANCELLED"].includes(nextStatus)) {
+        return reply({ ok: false, error: "Invalid task status" }, 422);
+      }
+      const res = await env.DB.prepare(
+        "UPDATE tasks SET status = ?1, updated_at = ?2 WHERE id = ?3"
+      )
+        .bind(nextStatus, Date.now(), taskId)
+        .run();
+      if ((res.meta?.changes || 0) === 0) {
+        return reply({ ok: false, error: "Task not found" }, 404);
+      }
+      return reply({ ok: true, id: taskId, status: nextStatus });
+    }
+
     if (url.pathname === "/api/audit" && request.method === "GET") {
       if (!env.DB) return reply({ ok: false, error: "D1 database (DB) is not bound" }, 503);
       const userId = url.searchParams.get("userId") || "device";

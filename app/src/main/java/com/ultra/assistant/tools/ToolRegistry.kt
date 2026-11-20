@@ -271,7 +271,8 @@ class ToolRegistry(
             val settings = settingsRepository.settingsFlow.first()
 
             val result = if (directSend && settings.directSmsEnabled && PermissionManager.isDefaultSmsApp(appContext)) {
-                smsController.sendDirectIfAuthorized(recipient, message)
+                val direct = smsController.sendDirectIfAuthorized(recipient, message)
+                if (direct.success) direct else smsController.prepareDraftIntent(recipient, message)
             } else {
                 smsController.prepareDraftIntent(recipient, message)
             }

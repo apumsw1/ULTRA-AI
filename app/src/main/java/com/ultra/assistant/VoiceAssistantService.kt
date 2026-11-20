@@ -71,8 +71,8 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
         super.onCreate()
         destroyed = false
         isRunning = true
-        settingsRepository = LocalSettingsRepository(this)
-        agentManager = AgentManager(this)
+        settingsRepository = UltraRuntime.settingsRepository(this)
+        agentManager = UltraRuntime.agentManager(this)
         floatingDot = FloatingDot(this)
         createNotificationChannel()
         startForeground(31, createNotification())

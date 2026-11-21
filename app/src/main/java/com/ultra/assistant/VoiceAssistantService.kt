@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -17,8 +18,10 @@ import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
 import com.ultra.assistant.brain.AgentManager
 import com.ultra.assistant.data.LocalSettingsRepository
+import com.ultra.assistant.permissions.PermissionManager
 import com.ultra.assistant.voice.LanguageManager
 import com.ultra.assistant.voice.WakeWordEngine
 import kotlinx.coroutines.CoroutineScope
@@ -70,18 +73,45 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
     override fun onCreate() {
         super.onCreate()
         destroyed = false
-        isRunning = true
         settingsRepository = UltraRuntime.settingsRepository(this)
         agentManager = UltraRuntime.agentManager(this)
         floatingDot = FloatingDot(this)
         createNotificationChannel()
-        startForeground(31, createNotification())
-        tts = TextToSpeech(this, this)
+
+        if (!PermissionManager.hasMicrophone(this)) {
+            isRunning = false
+            currentState = "IDLE"
+            stopSelf()
+            return
+        }
+
+        val fgsStarted = runCatching {
+            val fgsType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            } else {
+                0
+            }
+            ServiceCompat.startForeground(this, 31, createNotification(), fgsType)
+        }.isSuccess
+
+        if (!fgsStarted) {
+            isRunning = false
+            currentState = "IDLE"
+            stopSelf()
+            return
+        }
+
+        isRunning = true
+        runCatching { tts = TextToSpeech(this, this) }
         setupRecognizer()
         startListening()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (!PermissionManager.hasMicrophone(this)) {
+            stopVoiceService()
+            return START_NOT_STICKY
+        }
         when (intent?.action) {
             ACTION_STOP -> {
                 stopVoiceService()
@@ -150,7 +180,7 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
             return
         }
         runCatching { recognizer?.destroy() }
-        recognizer = SpeechRecognizer.createSpeechRecognizer(this)
+        recognizer = runCatching { SpeechRecognizer.createSpeechRecognizer(this) }.getOrNull()
         recognizer?.setRecognitionListener(object : RecognitionListener {
             override fun onReadyForSpeech(params: Bundle?) {
                 if (!isRunning) return

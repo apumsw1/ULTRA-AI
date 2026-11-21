@@ -69,22 +69,37 @@ class CloudSyncRepository(
     context: Context
 ) {
     private val appContext = context.applicationContext
-    private val db: FirebaseFirestore by lazy {
-        FirebaseFirestore.getInstance(appContext.getString(R.string.firestore_database_id))
+    private val db: FirebaseFirestore? by lazy {
+        runCatching {
+            if (isFirebaseInitialized(appContext)) {
+                FirebaseFirestore.getInstance(appContext.getString(R.string.firestore_database_id))
+            } else {
+                null
+            }
+        }.getOrNull()
     }
-    private val auth: FirebaseAuth by lazy { Firebase.auth }
+    private val auth: FirebaseAuth? by lazy {
+        runCatching {
+            if (isFirebaseInitialized(appContext)) Firebase.auth else null
+        }.getOrNull()
+    }
 
     private fun requireUserId(): String =
-        auth.currentUser?.uid
+        auth?.currentUser?.uid
             ?: throw IllegalStateException("User must be signed in with Google before accessing Firestore.")
 
     private fun sanitizeDocId(raw: String): String =
         raw.replace(Regex("[^a-zA-Z0-9_\\-]"), "_").take(128).ifBlank { "item_${System.currentTimeMillis()}" }
 
     fun observeMemories(userId: String): Flow<List<SyncedMemory>> = flow {
+        val firestore = db
+        if (firestore == null || auth == null) {
+            emit(emptyList())
+            return@flow
+        }
         val path = "users/$userId/memories"
         emitAll(
-            db.collection("users").document(userId).collection("memories")
+            firestore.collection("users").document(userId).collection("memories")
                 .snapshots()
                 .map { snapshot ->
                     snapshot.toObjects(
@@ -98,7 +113,7 @@ class CloudSyncRepository(
                         .firstOrNull()
                     if (firestoreError == null && error is CancellationException) throw error
                     val exceptionToLog = firestoreError ?: (error as? Exception)
-                    if (exceptionToLog != null && auth.currentUser?.uid == userId) {
+                    if (exceptionToLog != null && auth?.currentUser?.uid == userId) {
                         handleFirestoreError(exceptionToLog, OperationType.LIST, path)
                     }
                     throw error
@@ -114,15 +129,16 @@ class CloudSyncRepository(
         encrypted: Boolean,
         expiresAtMillis: Long
     ): Result<Unit> {
+        val firestore = db ?: return Result.failure(IllegalStateException("Firestore unavailable"))
         val safeId = sanitizeDocId(docId)
-        val uid = auth.currentUser?.uid ?: return Result.failure(IllegalStateException("Unauthenticated"))
+        val uid = auth?.currentUser?.uid ?: return Result.failure(IllegalStateException("Unauthenticated"))
         val path = "users/$uid/memories/$safeId"
         return try {
             val safeCategory = if (category in setOf("PREFERENCE", "CONTEXT", "CONVERSATION", "KNOWLEDGE")) category else "CONTEXT"
             val safeTitle = title.trim().take(120).ifBlank { "Memory" }
             val safeContent = content.trim().take(2000).ifBlank { "Empty" }
             val safeExpires = expiresAtMillis.coerceAtLeast(0L)
-            val docRef = db.collection("users").document(uid).collection("memories").document(safeId)
+            val docRef = firestore.collection("users").document(uid).collection("memories").document(safeId)
             val existing = docRef.get().await()
             if (existing.exists()) {
                 docRef.update(
@@ -159,11 +175,12 @@ class CloudSyncRepository(
     }
 
     suspend fun deleteMemory(docId: String): Result<Unit> {
+        val firestore = db ?: return Result.failure(IllegalStateException("Firestore unavailable"))
         val safeId = sanitizeDocId(docId)
-        val uid = auth.currentUser?.uid ?: return Result.failure(IllegalStateException("Unauthenticated"))
+        val uid = auth?.currentUser?.uid ?: return Result.failure(IllegalStateException("Unauthenticated"))
         val path = "users/$uid/memories/$safeId"
         return try {
-            db.collection("users").document(uid).collection("memories").document(safeId).delete().await()
+            firestore.collection("users").document(uid).collection("memories").document(safeId).delete().await()
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -174,9 +191,14 @@ class CloudSyncRepository(
     }
 
     fun observeAutomations(userId: String): Flow<List<SyncedAutomation>> = flow {
+        val firestore = db
+        if (firestore == null || auth == null) {
+            emit(emptyList())
+            return@flow
+        }
         val path = "users/$userId/automations"
         emitAll(
-            db.collection("users").document(userId).collection("automations")
+            firestore.collection("users").document(userId).collection("automations")
                 .snapshots()
                 .map { snapshot ->
                     snapshot.toObjects(
@@ -190,7 +212,7 @@ class CloudSyncRepository(
                         .firstOrNull()
                     if (firestoreError == null && error is CancellationException) throw error
                     val exceptionToLog = firestoreError ?: (error as? Exception)
-                    if (exceptionToLog != null && auth.currentUser?.uid == userId) {
+                    if (exceptionToLog != null && auth?.currentUser?.uid == userId) {
                         handleFirestoreError(exceptionToLog, OperationType.LIST, path)
                     }
                     throw error
@@ -207,12 +229,13 @@ class CloudSyncRepository(
         actionArgsJson: String,
         enabled: Boolean
     ): Result<Unit> {
+        val firestore = db ?: return Result.failure(IllegalStateException("Firestore unavailable"))
         val safeId = sanitizeDocId(docId)
-        val uid = auth.currentUser?.uid ?: return Result.failure(IllegalStateException("Unauthenticated"))
+        val uid = auth?.currentUser?.uid ?: return Result.failure(IllegalStateException("Unauthenticated"))
         val path = "users/$uid/automations/$safeId"
         return try {
             val safeTrigger = if (triggerType in setOf("VOICE_PHRASE", "SCHEDULED_REMINDER", "MANUAL_WORKFLOW")) triggerType else "MANUAL_WORKFLOW"
-            val docRef = db.collection("users").document(uid).collection("automations").document(safeId)
+            val docRef = firestore.collection("users").document(uid).collection("automations").document(safeId)
             val existing = docRef.get().await()
             if (existing.exists()) {
                 docRef.update(
@@ -251,11 +274,12 @@ class CloudSyncRepository(
     }
 
     suspend fun deleteAutomation(docId: String): Result<Unit> {
+        val firestore = db ?: return Result.failure(IllegalStateException("Firestore unavailable"))
         val safeId = sanitizeDocId(docId)
-        val uid = auth.currentUser?.uid ?: return Result.failure(IllegalStateException("Unauthenticated"))
+        val uid = auth?.currentUser?.uid ?: return Result.failure(IllegalStateException("Unauthenticated"))
         val path = "users/$uid/automations/$safeId"
         return try {
-            db.collection("users").document(uid).collection("automations").document(safeId).delete().await()
+            firestore.collection("users").document(uid).collection("automations").document(safeId).delete().await()
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -273,13 +297,14 @@ class CloudSyncRepository(
         summary: String,
         verified: Boolean
     ): Result<Unit> {
+        val firestore = db ?: return Result.failure(IllegalStateException("Firestore unavailable"))
         val safeId = sanitizeDocId(docId)
-        val uid = auth.currentUser?.uid ?: return Result.failure(IllegalStateException("Unauthenticated"))
+        val uid = auth?.currentUser?.uid ?: return Result.failure(IllegalStateException("Unauthenticated"))
         val path = "users/$uid/audit_logs/$safeId"
         return try {
             val safeRisk = if (riskLevel in setOf("LOW", "MEDIUM", "HIGH")) riskLevel else "LOW"
             val safeStatus = if (status in setOf("SUCCESS", "FAILED", "DENIED", "AWAITING_CONFIRMATION")) status else "SUCCESS"
-            db.collection("users").document(uid).collection("audit_logs").document(safeId)
+            firestore.collection("users").document(uid).collection("audit_logs").document(safeId)
                 .set(
                     mapOf(
                         "userId" to uid,

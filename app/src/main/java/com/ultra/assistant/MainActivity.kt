@@ -69,13 +69,10 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.google.firebase.Firebase
 import com.google.firebase.auth.auth
-import com.ultra.assistant.brain.AgentManager
-import com.ultra.assistant.data.LocalSettingsRepository
-import com.ultra.assistant.firebase.CloudSyncRepository
 import com.ultra.assistant.firebase.authStateFlow
 import com.ultra.assistant.firebase.configureAppCheck
+import com.ultra.assistant.firebase.isFirebaseInitialized
 import com.ultra.assistant.firebase.signOut
-import com.ultra.assistant.memory.MemoryManager
 import com.ultra.assistant.permissions.PermissionManager
 import com.ultra.assistant.tools.PermissionRequirement
 import com.ultra.assistant.ui.UltraViewModel
@@ -134,11 +131,44 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun UltraAppRoot() {
-    val auth = Firebase.auth
+    val context = LocalContext.current
+    val firebaseReady = remember(context) { isFirebaseInitialized(context) }
+    var offlineModeActive by remember { mutableStateOf(false) }
+
+    if (!firebaseReady) {
+        if (offlineModeActive) {
+            UltraAuthenticatedShell(
+                currentUserId = "local_offline_user",
+                userEmail = "Offline Local Mode",
+                onOfflineExit = { offlineModeActive = false }
+            )
+        } else {
+            AuthScreen(
+                firebaseAvailable = false,
+                onAuthSuccess = {},
+                onContinueOffline = { offlineModeActive = true }
+            )
+        }
+        return
+    }
+
+    val auth = remember { runCatching { Firebase.auth }.getOrNull() }
+    if (auth == null) {
+        AuthScreen(
+            firebaseAvailable = false,
+            onAuthSuccess = {},
+            onContinueOffline = { offlineModeActive = true }
+        )
+        return
+    }
+
     val currentUser by auth.authStateFlow().collectAsStateWithLifecycle(initialValue = auth.currentUser)
     val user = currentUser
     if (user == null) {
-        AuthScreen(onAuthSuccess = {})
+        AuthScreen(
+            firebaseAvailable = true,
+            onAuthSuccess = {}
+        )
     } else {
         key(user.uid) {
             UltraAuthenticatedShell(
@@ -152,7 +182,8 @@ fun UltraAppRoot() {
 @Composable
 fun UltraAuthenticatedShell(
     currentUserId: String,
-    userEmail: String?
+    userEmail: String?,
+    onOfflineExit: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -258,65 +289,92 @@ fun UltraAuthenticatedShell(
         onDispose { runCatching { context.unregisterReceiver(receiver) } }
     }
 
+    val safeStartActivity: (Intent) -> Unit = { targetIntent ->
+        runCatching { context.startActivity(targetIntent) }.onFailure {
+            Toast.makeText(context, "This settings screen is unavailable on this device.", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
     ) { results ->
         viewModel.refreshSystemState()
         if (results.values.all { it }) {
-            ContextCompat.startForegroundService(context, Intent(context, VoiceAssistantService::class.java))
-            isServiceRunning = true
-            Toast.makeText(context, "ULTRA AI voice active", Toast.LENGTH_SHORT).show()
+            val started = runCatching {
+                ContextCompat.startForegroundService(context, Intent(context, VoiceAssistantService::class.java))
+            }.isSuccess
+            isServiceRunning = started
+            Toast.makeText(
+                context,
+                if (started) "ULTRA AI voice active" else "Could not start voice service right now.",
+                Toast.LENGTH_SHORT
+            ).show()
         } else {
             Toast.makeText(context, "Microphone permission is required for voice control", Toast.LENGTH_LONG).show()
         }
     }
 
-    val startVoiceAssistant = {
+    val startVoiceAssistant: () -> Unit = {
         val missing = PermissionManager.missing(context)
         if (missing.isNotEmpty()) {
             permissionLauncher.launch(missing.toTypedArray())
         } else {
-            ContextCompat.startForegroundService(context, Intent(context, VoiceAssistantService::class.java))
-            isServiceRunning = true
+            val started = runCatching {
+                ContextCompat.startForegroundService(context, Intent(context, VoiceAssistantService::class.java))
+            }.isSuccess
+            isServiceRunning = started
+            if (!started) {
+                Toast.makeText(context, "Unable to start foreground voice service.", Toast.LENGTH_SHORT).show()
+            }
         }
     }
 
-    val stopVoiceAssistant = {
-        context.startService(Intent(context, VoiceAssistantService::class.java).setAction(VoiceAssistantService.ACTION_STOP))
+    val stopVoiceAssistant: () -> Unit = {
+        runCatching {
+            context.startService(Intent(context, VoiceAssistantService::class.java).setAction(VoiceAssistantService.ACTION_STOP))
+        }.onFailure {
+            runCatching { context.stopService(Intent(context, VoiceAssistantService::class.java)) }
+        }
         isServiceRunning = false
         voiceState = "IDLE"
     }
 
-    val interruptVoiceAssistant = {
+    val interruptVoiceAssistant: () -> Unit = {
         if (VoiceAssistantService.isRunning) {
-            context.startService(Intent(context, VoiceAssistantService::class.java).setAction(VoiceAssistantService.ACTION_INTERRUPT))
+            runCatching {
+                context.startService(Intent(context, VoiceAssistantService::class.java).setAction(VoiceAssistantService.ACTION_INTERRUPT))
+            }
         }
     }
 
-    val enableFloatingDot = {
+    val enableFloatingDot: () -> Unit = {
         if (!PermissionManager.hasOverlay(context)) {
-            context.startActivity(PermissionManager.overlaySettingsIntent(context))
+            safeStartActivity(PermissionManager.overlaySettingsIntent(context))
         } else {
-            ContextCompat.startForegroundService(
-                context,
-                Intent(context, VoiceAssistantService::class.java).setAction(VoiceAssistantService.ACTION_SHOW_DOT)
-            )
-            Toast.makeText(context, "Floating U overlay enabled", Toast.LENGTH_SHORT).show()
+            runCatching {
+                ContextCompat.startForegroundService(
+                    context,
+                    Intent(context, VoiceAssistantService::class.java).setAction(VoiceAssistantService.ACTION_SHOW_DOT)
+                )
+                Toast.makeText(context, "Floating U overlay enabled", Toast.LENGTH_SHORT).show()
+            }.onFailure {
+                Toast.makeText(context, "Unable to enable floating overlay.", Toast.LENGTH_SHORT).show()
+            }
         }
     }
 
     val fixMissingPermission: (PermissionRequirement) -> Unit = { req ->
         when (req) {
-            PermissionRequirement.ACCESSIBILITY -> context.startActivity(PermissionManager.accessibilitySettingsIntent())
-            PermissionRequirement.NOTIFICATION_LISTENER -> context.startActivity(PermissionManager.notificationListenerSettingsIntent())
-            PermissionRequirement.OVERLAY -> context.startActivity(PermissionManager.overlaySettingsIntent(context))
-            PermissionRequirement.DEVICE_ADMIN -> context.startActivity(PermissionManager.deviceAdminActivateIntent(context))
+            PermissionRequirement.ACCESSIBILITY -> safeStartActivity(PermissionManager.accessibilitySettingsIntent())
+            PermissionRequirement.NOTIFICATION_LISTENER -> safeStartActivity(PermissionManager.notificationListenerSettingsIntent())
+            PermissionRequirement.OVERLAY -> safeStartActivity(PermissionManager.overlaySettingsIntent(context))
+            PermissionRequirement.DEVICE_ADMIN -> safeStartActivity(PermissionManager.deviceAdminActivateIntent(context))
             PermissionRequirement.MICROPHONE, PermissionRequirement.POST_NOTIFICATIONS -> {
                 val missing = PermissionManager.missing(context)
                 if (missing.isNotEmpty()) permissionLauncher.launch(missing.toTypedArray())
-                else context.startActivity(PermissionManager.appDetailsIntent(context))
+                else safeStartActivity(PermissionManager.appDetailsIntent(context))
             }
-            PermissionRequirement.DEFAULT_SMS_APP -> context.startActivity(PermissionManager.appDetailsIntent(context))
+            PermissionRequirement.DEFAULT_SMS_APP -> safeStartActivity(PermissionManager.appDetailsIntent(context))
         }
     }
 
@@ -435,8 +493,8 @@ fun UltraAuthenticatedShell(
                             smsCaps = viewModel.smsCapabilities(),
                             onRunToolTest = viewModel::runToolDirectly,
                             onInspectScreen = viewModel::inspectCurrentScreen,
-                            onOpenAccessibilitySettings = { context.startActivity(PermissionManager.accessibilitySettingsIntent()) },
-                            onOpenNotificationSettings = { context.startActivity(PermissionManager.notificationListenerSettingsIntent()) },
+                            onOpenAccessibilitySettings = { safeStartActivity(PermissionManager.accessibilitySettingsIntent()) },
+                            onOpenNotificationSettings = { safeStartActivity(PermissionManager.notificationListenerSettingsIntent()) },
                             onClearNotifications = viewModel::clearNotifications,
                             onPrepareSmsDraft = viewModel::prepareSmsDraft
                         )
@@ -474,16 +532,20 @@ fun UltraAuthenticatedShell(
                             onSaveMemory = viewModel::saveMemoryManual,
                             onDeleteMemory = viewModel::deleteMemory,
                             onClearAllMemories = viewModel::clearAllMemories,
-                            onOpenMicAppSettings = { context.startActivity(PermissionManager.appDetailsIntent(context)) },
-                            onOpenOverlaySettings = { context.startActivity(PermissionManager.overlaySettingsIntent(context)) },
-                            onOpenAccessibilitySettings = { context.startActivity(PermissionManager.accessibilitySettingsIntent()) },
-                            onOpenNotificationSettings = { context.startActivity(PermissionManager.notificationListenerSettingsIntent()) },
-                            onOpenBatterySettings = { context.startActivity(PermissionManager.batteryOptimizationSettingsIntent()) },
-                            onActivateDeviceAdmin = { context.startActivity(PermissionManager.deviceAdminActivateIntent(context)) },
-                            onOpenSecuritySettings = { context.startActivity(PermissionManager.securitySettingsIntent()) },
+                            onOpenMicAppSettings = { safeStartActivity(PermissionManager.appDetailsIntent(context)) },
+                            onOpenOverlaySettings = { safeStartActivity(PermissionManager.overlaySettingsIntent(context)) },
+                            onOpenAccessibilitySettings = { safeStartActivity(PermissionManager.accessibilitySettingsIntent()) },
+                            onOpenNotificationSettings = { safeStartActivity(PermissionManager.notificationListenerSettingsIntent()) },
+                            onOpenBatterySettings = { safeStartActivity(PermissionManager.batteryOptimizationSettingsIntent()) },
+                            onActivateDeviceAdmin = { safeStartActivity(PermissionManager.deviceAdminActivateIntent(context)) },
+                            onOpenSecuritySettings = { safeStartActivity(PermissionManager.securitySettingsIntent()) },
                             onSignOut = {
                                 if (VoiceAssistantService.isRunning) stopVoiceAssistant()
-                                signOut(credentialManager, scope)
+                                if (onOfflineExit != null) {
+                                    onOfflineExit()
+                                } else {
+                                    signOut(credentialManager, scope)
+                                }
                             }
                         )
                     }

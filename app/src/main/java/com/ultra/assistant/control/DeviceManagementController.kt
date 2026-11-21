@@ -17,12 +17,12 @@ data class DeviceInfoReport(
 
 class DeviceManagementController(context: Context) {
     private val appContext = context.applicationContext
-    private val dpm = appContext.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+    private val dpm = appContext.getSystemService(Context.DEVICE_POLICY_SERVICE) as? DevicePolicyManager
     private val adminComponent = ComponentName(appContext, UltraDeviceAdminReceiver::class.java)
 
-    fun isAdminActive(): Boolean = dpm.isAdminActive(adminComponent)
+    fun isAdminActive(): Boolean = runCatching { dpm?.isAdminActive(adminComponent) == true }.getOrDefault(false)
 
-    fun isDeviceOwner(): Boolean = dpm.isDeviceOwnerApp(appContext.packageName)
+    fun isDeviceOwner(): Boolean = runCatching { dpm?.isDeviceOwnerApp(appContext.packageName) == true }.getOrDefault(false)
 
     fun getDeviceInfo(): DeviceInfoReport = DeviceInfoReport(
         manufacturer = Build.MANUFACTURER,
@@ -34,13 +34,14 @@ class DeviceManagementController(context: Context) {
     )
 
     fun lockScreenIfAuthorized(): Result<String> {
+        val manager = dpm ?: return Result.failure(IllegalStateException("DevicePolicyManager unavailable on this device."))
         if (!isAdminActive()) {
             return Result.failure(
                 IllegalStateException("Device Administrator is not enabled. Enable it voluntarily in Settings > Security to allow screen locking.")
             )
         }
         return runCatching {
-            dpm.lockNow()
+            manager.lockNow()
             "Device screen locked via authorized DevicePolicyManager."
         }
     }

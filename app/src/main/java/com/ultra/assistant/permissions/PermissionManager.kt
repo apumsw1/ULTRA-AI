@@ -46,36 +46,38 @@ object PermissionManager {
     fun hasNotifications(context: Context): Boolean = Build.VERSION.SDK_INT < 33 ||
         ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
 
-    fun hasOverlay(context: Context): Boolean = Settings.canDrawOverlays(context)
+    fun hasOverlay(context: Context): Boolean = runCatching {
+        Settings.canDrawOverlays(context)
+    }.getOrDefault(false)
 
-    fun isAccessibilityEnabled(context: Context): Boolean {
+    fun isAccessibilityEnabled(context: Context): Boolean = runCatching {
         val am = context.getSystemService(Context.ACCESSIBILITY_SERVICE) as? AccessibilityManager ?: return false
         val enabledServices = am.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK)
         val expectedComponent = ComponentName(context, UltraAccessibilityService::class.java)
-        return enabledServices.any { info ->
+        enabledServices.any { info ->
             val serviceInfo = info.resolveInfo?.serviceInfo
             serviceInfo?.packageName == expectedComponent.packageName &&
                 serviceInfo.name == expectedComponent.className
         } || UltraAccessibilityService.isServiceConnected()
-    }
+    }.getOrDefault(UltraAccessibilityService.isServiceConnected())
 
-    fun isNotificationListenerEnabled(context: Context): Boolean {
-        return NotificationManagerCompat.getEnabledListenerPackages(context).contains(context.packageName)
-    }
+    fun isNotificationListenerEnabled(context: Context): Boolean = runCatching {
+        NotificationManagerCompat.getEnabledListenerPackages(context).contains(context.packageName)
+    }.getOrDefault(false)
 
-    fun isDeviceAdminActive(context: Context): Boolean {
+    fun isDeviceAdminActive(context: Context): Boolean = runCatching {
         val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as? DevicePolicyManager ?: return false
-        return dpm.isAdminActive(ComponentName(context, UltraDeviceAdminReceiver::class.java))
-    }
+        dpm.isAdminActive(ComponentName(context, UltraDeviceAdminReceiver::class.java))
+    }.getOrDefault(false)
 
-    fun isBatteryOptimizationIgnored(context: Context): Boolean {
+    fun isBatteryOptimizationIgnored(context: Context): Boolean = runCatching {
         val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return false
-        return pm.isIgnoringBatteryOptimizations(context.packageName)
-    }
+        pm.isIgnoringBatteryOptimizations(context.packageName)
+    }.getOrDefault(false)
 
-    fun isDefaultSmsApp(context: Context): Boolean {
-        return Telephony.Sms.getDefaultSmsPackage(context) == context.packageName
-    }
+    fun isDefaultSmsApp(context: Context): Boolean = runCatching {
+        Telephony.Sms.getDefaultSmsPackage(context) == context.packageName
+    }.getOrDefault(false)
 
     fun snapshot(context: Context): PermissionAuditSnapshot = PermissionAuditSnapshot(
         microphoneGranted = hasMicrophone(context),

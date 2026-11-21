@@ -54,7 +54,9 @@ import com.ultra.assistant.ui.theme.EmeraldVerified
 
 @Composable
 fun AuthScreen(
-    onAuthSuccess: () -> Unit
+    firebaseAvailable: Boolean = true,
+    onAuthSuccess: () -> Unit,
+    onContinueOffline: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -63,14 +65,16 @@ fun AuthScreen(
     var isLoading by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(Unit) {
-        attemptAutoSignIn(
-            context = context,
-            credentialManager = credentialManager,
-            onAuthSuccess = onAuthSuccess,
-            onUnauthenticated = {},
-            scope = scope
-        )
+    LaunchedEffect(firebaseAvailable) {
+        if (firebaseAvailable) {
+            attemptAutoSignIn(
+                context = context,
+                credentialManager = credentialManager,
+                onAuthSuccess = onAuthSuccess,
+                onUnauthenticated = {},
+                scope = scope
+            )
+        }
     }
 
     Box(
@@ -126,6 +130,16 @@ fun AuthScreen(
                 }
             }
 
+            if (!firebaseAvailable) {
+                HudCard(borderColor = ArcCyan) {
+                    Text(
+                        text = "This APK was built without Firebase google-services.json. Cloud Sync & Google Sign-In are paused; local tools, voice control, Room memory, and Cloudflare Worker mode work normally.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+            }
+
             if (!errorMessage.isNullOrBlank()) {
                 HudCard(borderColor = CrimsonAlert) {
                     Text(
@@ -136,45 +150,61 @@ fun AuthScreen(
                 }
             }
 
-            Button(
-                onClick = {
-                    isLoading = true
-                    errorMessage = null
-                    onGoogleSignInClicked(
-                        context = context,
-                        credentialManager = credentialManager,
-                        onAuthSuccess = {
-                            isLoading = false
-                            onAuthSuccess()
-                        },
-                        onAuthError = { msg ->
-                            isLoading = false
-                            errorMessage = msg
-                        },
-                        scope = scope,
-                        onAuthCancelled = {
-                            isLoading = false
-                        }
-                    )
-                },
-                enabled = !isLoading,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.primary,
-                    contentColor = MaterialTheme.colorScheme.onPrimary
-                ),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(54.dp)
-                    .testTag("google_sign_in_button")
-            ) {
-                if (isLoading) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(22.dp),
-                        color = MaterialTheme.colorScheme.onPrimary,
-                        strokeWidth = 2.dp
-                    )
-                } else {
-                    Text("Sign in with Google", fontWeight = FontWeight.Bold)
+            if (firebaseAvailable) {
+                Button(
+                    onClick = {
+                        isLoading = true
+                        errorMessage = null
+                        onGoogleSignInClicked(
+                            context = context,
+                            credentialManager = credentialManager,
+                            onAuthSuccess = {
+                                isLoading = false
+                                onAuthSuccess()
+                            },
+                            onAuthError = { msg ->
+                                isLoading = false
+                                errorMessage = msg
+                            },
+                            scope = scope,
+                            onAuthCancelled = {
+                                isLoading = false
+                            }
+                        )
+                    },
+                    enabled = !isLoading,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onPrimary
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(54.dp)
+                        .testTag("google_sign_in_button")
+                ) {
+                    if (isLoading) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(22.dp),
+                            color = MaterialTheme.colorScheme.onPrimary,
+                            strokeWidth = 2.dp
+                        )
+                    } else {
+                        Text("Sign in with Google", fontWeight = FontWeight.Bold)
+                    }
+                }
+            } else {
+                Button(
+                    onClick = onContinueOffline,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onPrimary
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(54.dp)
+                        .testTag("continue_offline_button")
+                ) {
+                    Text("Launch ULTRA AI (Local Mode)", fontWeight = FontWeight.Bold)
                 }
             }
 

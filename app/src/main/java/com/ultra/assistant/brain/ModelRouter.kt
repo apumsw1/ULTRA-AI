@@ -120,6 +120,10 @@ class ModelRouter(
         configuredModel: String,
         prompt: String
     ): Result<Pair<String, ReasoningDecision>> {
+        val firebaseReady = runCatching { com.google.firebase.FirebaseApp.getInstance() }.isSuccess
+        if (!firebaseReady) {
+            return Result.failure(IllegalStateException("Firebase AI is not configured in this build (missing google-services.json)."))
+        }
         val model = when (configuredModel) {
             "gemini-3.5-flash-lite" -> liteGeminiPlanner
             "gemini-4-argon" -> argonGeminiPlanner
@@ -212,6 +216,11 @@ class ModelRouter(
         history: List<Pair<String, String>>,
         languageLabel: String
     ): Flow<String> = flow {
+        val firebaseReady = runCatching { com.google.firebase.FirebaseApp.getInstance() }.isSuccess
+        if (!firebaseReady) {
+            emit("Firebase AI is unavailable in this build. Configure google-services.json or use Cloudflare Worker mode.")
+            return@flow
+        }
         val fullPrompt = "You are ULTRA AI, a helpful multilingual assistant ($languageLabel). Keep replies concise and natural.\n$prompt"
         val chatHistory = history.takeLast(6).map { (role, text) ->
             content(if (role == "user") "user" else "model") { text(text) }

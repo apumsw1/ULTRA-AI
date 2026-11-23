@@ -71,6 +71,8 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.google.firebase.Firebase
 import com.google.firebase.auth.auth
+import com.ultra.assistant.data.AiOperatingMode
+import com.ultra.assistant.data.AiSpeedProfile
 import com.ultra.assistant.data.UltraSettings
 import com.ultra.assistant.firebase.authStateFlow
 import com.ultra.assistant.firebase.configureAppCheck
@@ -256,6 +258,9 @@ fun UltraAuthenticatedShell(
     val pendingConfirmation by viewModel.pendingConfirmation.collectAsStateWithLifecycle()
     val streamingReply by viewModel.streamingReply.collectAsStateWithLifecycle()
     val isStreaming by viewModel.isStreaming.collectAsStateWithLifecycle()
+    val liveAgentStatus by viewModel.liveAgentStatus.collectAsStateWithLifecycle()
+    val onlineDiagnostic by viewModel.onlineDiagnostic.collectAsStateWithLifecycle()
+    val workerHealthStatus by viewModel.workerHealthStatus.collectAsStateWithLifecycle()
     val notifications by viewModel.notifications.collectAsStateWithLifecycle()
     val screenSnapshot by viewModel.screenSnapshot.collectAsStateWithLifecycle()
     val isBusy by viewModel.isAgentBusy.collectAsStateWithLifecycle()
@@ -489,6 +494,26 @@ fun UltraAuthenticatedShell(
         }
     }
 
+    val requestAllRuntimePermissions: () -> Unit = {
+        val allMissing = (PermissionManager.missing(context) + PermissionManager.missingContactsAndPhone(context)).distinct()
+        if (allMissing.isNotEmpty()) {
+            permissionLauncher.launch(allMissing.toTypedArray())
+        } else {
+            Toast.makeText(context, "All runtime permissions are already granted.", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    val stopAgentExecutionEverywhere: () -> Unit = {
+        viewModel.stopAgentExecution()
+        if (VoiceAssistantService.isRunning) {
+            runCatching {
+                context.startService(
+                    Intent(context, VoiceAssistantService::class.java).setAction(VoiceAssistantService.ACTION_CANCEL_AGENT)
+                )
+            }
+        }
+    }
+
     pendingConfirmation?.let { pending ->
         SensitiveConfirmationDialog(
             confirmation = pending,
@@ -592,6 +617,8 @@ fun UltraAuthenticatedShell(
                                     isBusy = isBusy,
                                     isStreaming = isStreaming,
                                     streamingReply = streamingReply,
+                                    liveAgentStatus = liveAgentStatus,
+                                    onlineDiagnostic = onlineDiagnostic,
                                     latestReport = latestReport,
                                     conversations = conversations,
                                     sessions = sessions,
@@ -600,6 +627,7 @@ fun UltraAuthenticatedShell(
                                     onStopAssistant = stopVoiceAssistant,
                                     onStopSpeaking = stopSpeakingOnly,
                                     onInterruptVoice = interruptVoiceAssistant,
+                                    onStopAgentExecution = stopAgentExecutionEverywhere,
                                     onEnableFloatingDot = {
                                         if (settings.floatingAssistantEnabled) disableFloatingDot() else enableFloatingDot()
                                     },
@@ -610,12 +638,36 @@ fun UltraAuthenticatedShell(
                                             restoreState = true
                                         }
                                     },
-                                    onSubmitCommand = { cmd -> viewModel.submitCommand(cmd) },
+                                    onSubmitCommand = { cmd ->
+                                        viewModel.submitCommand(cmd) { report ->
+                                            if (settings.autoSpeakChatReplies && report.finalReply.isNotBlank()) {
+                                                speakTextOutLoud(report.finalReply)
+                                            }
+                                        }
+                                    },
                                     onSpeakText = speakTextOutLoud,
                                     onStartNewChat = viewModel::startNewConversation,
                                     onSelectSession = viewModel::selectConversationSession,
                                     onDeleteSession = viewModel::deleteConversationSession,
-                                    onFixPermission = fixMissingPermission
+                                    onFixPermission = fixMissingPermission,
+                                    onCycleOperatingMode = {
+                                        val nextMode = when (settings.operatingMode) {
+                                            AiOperatingMode.AUTO -> AiOperatingMode.ONLINE
+                                            AiOperatingMode.ONLINE -> AiOperatingMode.OFFLINE
+                                            AiOperatingMode.OFFLINE -> AiOperatingMode.AUTO
+                                        }
+                                        viewModel.updateOperatingMode(nextMode)
+                                    },
+                                    onCycleSpeedProfile = {
+                                        val nextProfile = when (settings.aiSpeedProfile) {
+                                            AiSpeedProfile.TURBO -> AiSpeedProfile.BALANCED
+                                            AiSpeedProfile.BALANCED -> AiSpeedProfile.DEEP_THINK
+                                            AiSpeedProfile.DEEP_THINK -> AiSpeedProfile.TURBO
+                                        }
+                                        viewModel.updateSpeedProfile(nextProfile)
+                                    },
+                                    onRequestAllRuntimePermissions = requestAllRuntimePermissions,
+                                    onOpenBatterySettings = { safeStartActivity(PermissionManager.batteryOptimizationSettingsIntent()) }
                                 )
                             }
                             composable(UltraRoutes.VOICE) {
@@ -704,10 +756,16 @@ fun UltraAuthenticatedShell(
                                     deviceAdminExplanation = viewModel.deviceAdminExplanation(),
                                     memories = memories,
                                     sessions = sessions,
+                                    onlineDiagnostic = onlineDiagnostic,
+                                    workerHealthStatus = workerHealthStatus,
                                     onUpdateOperatingMode = viewModel::updateOperatingMode,
+                                    onUpdateSpeedProfile = viewModel::updateSpeedProfile,
                                     onUpdateAiConfig = viewModel::updateAiConfig,
+                                    onTestWorkerConnection = viewModel::testWorkerConnection,
                                     onUpdateVoiceGender = viewModel::updateVoiceGender,
                                     onSelectLanguage = viewModel::updateLanguage,
+                                    onUpdateLanguageAutoDetect = viewModel::updateLanguageAutoDetect,
+                                    onUpdateAutoSpeakChatReplies = viewModel::updateAutoSpeakChatReplies,
                                     onUpdateWakePhrase = viewModel::updateWakePhrase,
                                     onUpdateVoiceTuning = viewModel::updateVoiceTuning,
                                     onUpdateVoiceVolume = viewModel::updateVoiceVolume,
@@ -733,6 +791,7 @@ fun UltraAuthenticatedShell(
                                     onClearAllMemories = viewModel::clearAllMemories,
                                     onStartNewChat = viewModel::startNewConversation,
                                     onClearConversationHistory = viewModel::clearConversationHistoryOnly,
+                                    onRequestAllRuntimePermissions = requestAllRuntimePermissions,
                                     onRequestContactsAndPhone = {
                                         val missingCp = PermissionManager.missingContactsAndPhone(context)
                                         if (missingCp.isNotEmpty()) {

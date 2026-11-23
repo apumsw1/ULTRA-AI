@@ -132,7 +132,8 @@ class MemoryManager(
         role: String,
         content: String,
         languageTag: String,
-        providerLabel: String = ""
+        providerLabel: String = "",
+        thoughtSummary: String = ""
     ) {
         val sid = _activeSessionId.value
         val now = System.currentTimeMillis()
@@ -173,6 +174,7 @@ class MemoryManager(
                 content = safeContent,
                 languageTag = languageTag,
                 providerLabel = providerLabel,
+                thoughtSummary = PrivacyGuard.redact(thoughtSummary).take(600),
                 timestampMillis = now
             )
         )

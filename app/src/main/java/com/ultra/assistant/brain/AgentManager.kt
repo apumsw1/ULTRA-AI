@@ -1,13 +1,16 @@
 package com.ultra.assistant.brain
 
 import android.content.Context
+import com.ultra.assistant.control.ScreenController
 import com.ultra.assistant.data.LocalSettingsRepository
 import com.ultra.assistant.data.NetworkMonitor
 import com.ultra.assistant.memory.MemoryManager
+import com.ultra.assistant.tools.PermissionRequirement
 import com.ultra.assistant.tools.TaskExecutor
 import com.ultra.assistant.tools.ToolExecutionResult
 import com.ultra.assistant.tools.ToolRegistry
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -21,6 +24,7 @@ class AgentManager(
     private val appContext = context.applicationContext
     val toolRegistry = ToolRegistry(appContext, memoryManager, settingsRepository)
     private val taskExecutor = TaskExecutor(toolRegistry, memoryManager, settingsRepository)
+    private val screenController = ScreenController(appContext)
     val modelRouter = ModelRouter(settingsRepository)
     private val intentEngine = IntentEngine()
     val contextManager = ContextManager(memoryManager)
@@ -40,143 +44,301 @@ class AgentManager(
     private val _isStreaming = MutableStateFlow(false)
     val isStreamingFlow: StateFlow<Boolean> = _isStreaming.asStateFlow()
 
+    private val _liveStatus = MutableStateFlow("")
+    val liveStatusFlow: StateFlow<String> = _liveStatus.asStateFlow()
+
+    @Volatile
+    private var stopRequested: Boolean = false
+
+    fun requestStop() {
+        stopRequested = true
+        _liveStatus.value = "Stopping task..."
+    }
+
     suspend fun handleUserCommand(rawInput: String): AgentExecutionReport {
-        val input = rawInput.trim()
+        val input = IntentEngine.normalizeSpeechTranscript(rawInput.trim())
         val traces = mutableListOf<AgentStepTrace>()
         _streamingReply.value = ""
+        _liveStatus.value = "Analyzing intent..."
+        stopRequested = false
 
-        // Handle active music follow-up slot if waiting
-        if (contextManager.followUpSlot is FollowUpSlot.MusicLanguage) {
-            contextManager.followUpSlot = FollowUpSlot.None
-            val lang = when {
-                input.contains("বাংলা", true) || input.contains("bangla", true) || input.contains("bengali", true) -> "Bengali"
-                input.contains("হিন্দি", true) || input.contains("hindi", true) || input.contains("हिंदी", true) -> "Hindi"
-                input.contains("english", true) || input.contains("ইংরেজি", true) || input.contains("ইংলিশ", true) -> "English"
-                else -> ""
+        try {
+            // Handle active music follow-up slot if waiting
+            if (contextManager.followUpSlot is FollowUpSlot.MusicLanguage) {
+                contextManager.followUpSlot = FollowUpSlot.None
+                val lang = when {
+                    input.contains("বাংলা", true) || input.contains("bangla", true) || input.contains("bengali", true) -> "Bengali"
+                    input.contains("হিন্দি", true) || input.contains("hindi", true) || input.contains("हिंदी", true) -> "Hindi"
+                    input.contains("english", true) || input.contains("ইংরেজি", true) || input.contains("ইংলিশ", true) -> "English"
+                    else -> ""
+                }
+                if (lang.isNotBlank()) {
+                    _liveStatus.value = "Opening YouTube Music ($lang)..."
+                    val res = taskExecutor.executeTool("search_web", mapOf("query" to "$lang songs", "platform" to "youtube_music"))
+                    traces += AgentStepTrace(1, "TOOL", res.summary, res.success)
+                    contextManager.recordExchange(input, res.summary, "en")
+                    val report = AgentExecutionReport(
+                        userInput = input,
+                        providerUsed = "Local Music Router",
+                        finalReply = res.summary,
+                        steps = traces,
+                        toolResults = listOf(res),
+                        thoughtSummary = "Resolved music language follow-up slot to $lang."
+                    )
+                    _latestReport.value = report
+                    return report
+                }
             }
-            if (lang.isNotBlank()) {
-                val res = taskExecutor.executeTool("search_web", mapOf("query" to "$lang songs", "platform" to "youtube_music"))
-                traces += AgentStepTrace(1, "TOOL", res.summary, res.success)
-                contextManager.recordExchange(input, res.summary, "en")
-                val report = AgentExecutionReport(input, "Local Music Router", res.summary, traces, listOf(res))
-                _latestReport.value = report
-                return report
+
+            val intent = intentEngine.classify(input)
+            traces += AgentStepTrace(1, "INTENT", "Classified as ${intent.category.name} (lang=${intent.detectedLanguage})")
+
+            if (intent.category == IntentCategory.MUSIC_SEARCH && !IntentEngine.isCompoundAction(input)) {
+                val lower = input.lowercase()
+                val explicitLang = when {
+                    lower.contains("বাংলা") || lower.contains("bangla") || lower.contains("bengali") -> "Bengali songs"
+                    lower.contains("হিন্দি") || lower.contains("hindi") || lower.contains("हिंदी") -> "Hindi songs"
+                    lower.contains("english") || lower.contains("ইংলিশ") || lower.contains("ইংরেজি") -> "English songs"
+                    else -> null
+                }
+                if (explicitLang == null) {
+                    contextManager.followUpSlot = FollowUpSlot.MusicLanguage
+                    val prompt = "What kind of songs would you like: Bengali, Hindi, or English?"
+                    traces += AgentStepTrace(2, "PLAN", "Waiting for music language follow-up")
+                    contextManager.recordExchange(input, prompt, intent.detectedLanguage)
+                    val report = AgentExecutionReport(input, "Context Follow-Up", prompt, traces, emptyList())
+                    _latestReport.value = report
+                    return report
+                } else {
+                    val res = taskExecutor.executeTool("search_web", mapOf("query" to explicitLang, "platform" to "youtube_music"))
+                    traces += AgentStepTrace(2, "TOOL", res.summary, res.success)
+                    contextManager.recordExchange(input, res.summary, intent.detectedLanguage)
+                    val report = AgentExecutionReport(input, "Local Music Router", res.summary, traces, listOf(res))
+                    _latestReport.value = report
+                    return report
+                }
             }
-        }
 
-        val intent = intentEngine.classify(input)
-        traces += AgentStepTrace(1, "INTENT", "Classified as ${intent.category.name} (lang=${intent.detectedLanguage})")
+            val history = contextManager.getRecentHistoryPairs(12)
+            val memories = contextManager.buildMemorySummary()
+            val effectiveOffline = reasoningEngine.isEffectiveOffline()
 
-        if (intent.category == IntentCategory.MUSIC_SEARCH) {
-            val lower = input.lowercase()
-            val explicitLang = when {
-                lower.contains("বাংলা") || lower.contains("bangla") || lower.contains("bengali") -> "Bengali songs"
-                lower.contains("হিন্দি") || lower.contains("hindi") || lower.contains("हिंदी") -> "Hindi songs"
-                lower.contains("english") || lower.contains("ইংলিশ") || lower.contains("ইংরেজি") -> "English songs"
-                else -> null
+            // Stream analytical ChatGPT-style conversation directly when online and not an action command
+            if (intent.category == IntentCategory.CONVERSATION &&
+                !effectiveOffline &&
+                !looksLikeActionRequest(input)
+            ) {
+                _liveStatus.value = "✦ Thinking..."
+                val streamed = tryStreamConversation(input, history, memories, intent.detectedLanguage)
+                if (streamed != null) {
+                    traces += AgentStepTrace(2, "PLAN", streamed.thoughtSummary.ifBlank { "Streamed conversational reasoning" })
+                    memoryManager.recordConversationTurn("user", input, intent.detectedLanguage)
+                    memoryManager.recordConversationTurn(
+                        role = "assistant",
+                        content = streamed.reply,
+                        languageTag = intent.detectedLanguage,
+                        providerLabel = streamed.provider,
+                        thoughtSummary = streamed.thoughtSummary
+                    )
+                    val report = AgentExecutionReport(
+                        userInput = input,
+                        providerUsed = streamed.provider,
+                        finalReply = streamed.reply,
+                        steps = traces,
+                        toolResults = emptyList(),
+                        thoughtSummary = streamed.thoughtSummary
+                    )
+                    _latestReport.value = report
+                    return report
+                }
             }
-            if (explicitLang == null) {
-                contextManager.followUpSlot = FollowUpSlot.MusicLanguage
-                val prompt = "What kind of songs would you like: Bengali, Hindi, or English?"
-                traces += AgentStepTrace(2, "PLAN", "Waiting for music language follow-up")
-                contextManager.recordExchange(input, prompt, intent.detectedLanguage)
-                val report = AgentExecutionReport(input, "Context Follow-Up", prompt, traces, emptyList())
-                _latestReport.value = report
-                return report
-            } else {
-                val res = taskExecutor.executeTool("search_web", mapOf("query" to explicitLang, "platform" to "youtube_music"))
-                traces += AgentStepTrace(2, "TOOL", res.summary, res.success)
-                contextManager.recordExchange(input, res.summary, intent.detectedLanguage)
-                val report = AgentExecutionReport(input, "Local Music Router", res.summary, traces, listOf(res))
-                _latestReport.value = report
-                return report
-            }
-        }
 
-        val history = contextManager.getRecentHistoryPairs(12)
-        val memories = contextManager.buildMemorySummary()
-
-        // If pure open-ended conversation and online, stream ChatGPT-style directly!
-        val effectiveOffline = reasoningEngine.isEffectiveOffline()
-        if (intent.category == IntentCategory.CONVERSATION &&
-            !effectiveOffline &&
-            !looksLikeActionRequest(input)
-        ) {
-            val streamed = tryStreamConversation(input, history, memories, intent.detectedLanguage)
-            if (streamed != null) {
-                traces += AgentStepTrace(2, "PLAN", "Streamed conversational response")
-                memoryManager.recordConversationTurn("user", input, intent.detectedLanguage)
-                memoryManager.recordConversationTurn("assistant", streamed.second, intent.detectedLanguage, streamed.first)
-                val report = AgentExecutionReport(
-                    userInput = input,
-                    providerUsed = streamed.first,
-                    finalReply = streamed.second,
-                    steps = traces,
-                    toolResults = emptyList()
-                )
-                _latestReport.value = report
-                return report
-            }
-        }
-
-        val (providerUsed, decision) = reasoningEngine.decide(
-            userInput = input,
-            intent = intent,
-            history = history,
-            memorySummary = memories,
-            toolCatalogJson = toolRegistry.schemaSummaryForPrompt()
-        )
-        traces += AgentStepTrace(2, "PLAN", decision.thoughtSummary.ifBlank { "Planned ${decision.plannedTools.size} tool(s) via $providerUsed" })
-
-        val plan = taskPlanner.buildPlan(decision)
-        val results = mutableListOf<ToolExecutionResult>()
-        for ((index, call) in plan.withIndex()) {
-            val res = taskExecutor.executeTool(call.toolId, call.args, userConfirmed = false)
-            results += res
-            traces += AgentStepTrace(3 + index, "TOOL", "${call.toolId}: ${res.summary}", res.success)
-            if (res.requiresConfirmation) {
-                _pendingConfirmation.value = PendingToolConfirmation(
-                    toolCall = call,
-                    promptMessage = "Confirm ${call.toolId.replace('_', ' ')}: ${call.args.entries.joinToString { "${it.key}=${it.value}" }}",
-                    originalUserRequest = input
-                )
-                break
-            }
-        }
-
-        val verification = resultVerifier.verify(decision.directReply, results)
-        traces += AgentStepTrace(traces.size + 1, "VERIFY", if (verification.allSucceeded) "Verified all steps" else "Detected partial/permission issue", verification.allSucceeded)
-
-        memoryManager.recordConversationTurn("user", input, intent.detectedLanguage)
-        memoryManager.recordConversationTurn("assistant", verification.userReply, intent.detectedLanguage, providerUsed)
-
-        if (decision.memoryCandidateTitle.isNotBlank() && decision.memoryCandidateContent.isNotBlank()) {
-            memoryManager.saveMemory(
-                category = "PREFERENCE",
-                title = decision.memoryCandidateTitle,
-                content = decision.memoryCandidateContent,
-                source = "ai_reasoning"
+            _liveStatus.value = "✦ Reasoning & Planning..."
+            val toolCatalogJson = toolRegistry.schemaSummaryForPrompt()
+            val (providerUsed, initialDecision) = reasoningEngine.decide(
+                userInput = input,
+                intent = intent,
+                history = history,
+                memorySummary = memories,
+                toolCatalogJson = toolCatalogJson
             )
-        }
+            val accumulatedThoughts = mutableListOf<String>()
+            if (initialDecision.thoughtSummary.isNotBlank()) {
+                accumulatedThoughts += initialDecision.thoughtSummary
+            }
+            traces += AgentStepTrace(2, "PLAN", initialDecision.thoughtSummary.ifBlank { "Planned ${initialDecision.plannedTools.size} tool(s) via $providerUsed" })
 
-        val report = AgentExecutionReport(
-            userInput = input,
-            providerUsed = providerUsed,
-            finalReply = verification.userReply,
-            steps = traces,
-            toolResults = results,
-            missingPermission = verification.missingPermission
-        )
-        _latestReport.value = report
-        return report
+            val results = mutableListOf<ToolExecutionResult>()
+            val completedStepNotes = mutableListOf<String>()
+            var latestReply = initialDecision.directReply
+            var awaitingConfirmation = false
+            var nextNeeded = initialDecision.nextActionNeeded ||
+                (IntentEngine.isCompoundAction(input) && initialDecision.plannedTools.any {
+                    it.toolId == "open_app" || it.toolId == "open_device_settings"
+                })
+
+            // Cycle 0: Execute initial plan
+            val initialPlan = taskPlanner.buildPlan(initialDecision)
+            for (call in initialPlan) {
+                if (stopRequested) break
+                _liveStatus.value = "⚡ ${call.toolId.replace('_', ' ')}..."
+                val res = taskExecutor.executeTool(call.toolId, call.args, userConfirmed = false)
+                results += res
+                completedStepNotes += "${call.toolId}(${call.args.values.joinToString(", ")}) -> ${res.summary}"
+                traces += AgentStepTrace(traces.size + 1, "TOOL", "${call.toolId}: ${res.summary}", res.success)
+                if (res.requiresConfirmation) {
+                    _pendingConfirmation.value = PendingToolConfirmation(
+                        toolCall = call,
+                        promptMessage = "Confirm ${call.toolId.replace('_', ' ')}: ${call.args.entries.joinToString { "${it.key}=${it.value}" }}",
+                        originalUserRequest = input
+                    )
+                    awaitingConfirmation = true
+                    break
+                }
+                if (!res.success && call.toolId == "open_app") {
+                    nextNeeded = false
+                }
+            }
+
+            // Autonomous Observe -> Think -> Act loop for multi-step in-app control (up to 5 follow-up cycles)
+            var extraMissingPerm: PermissionRequirement? = null
+            if (nextNeeded && !awaitingConfirmation && !stopRequested && results.any { it.success }) {
+                val initialDelay = if (initialPlan.any { it.toolId == "open_app" || it.toolId == "open_device_settings" }) 950L else 500L
+                delay(initialDelay)
+
+                for (cycle in 1..5) {
+                    if (stopRequested) break
+                    if (!screenController.isReady()) {
+                        extraMissingPerm = PermissionRequirement.ACCESSIBILITY
+                        traces += AgentStepTrace(
+                            traces.size + 1,
+                            "VERIFY",
+                            "Accessibility Service needed to inspect and control inside the opened app.",
+                            success = false
+                        )
+                        latestReply = "${results.lastOrNull()?.summary.orEmpty()} Enable ULTRA AI Accessibility Service so I can operate inside the app automatically.".trim()
+                        break
+                    }
+                    _liveStatus.value = "👁 Observing screen (Step ${cycle + 1})..."
+                    val screenDesc = screenController.describeScreenConcise().getOrElse { "Unavailable" }
+                    _liveStatus.value = "✦ Planning Step ${cycle + 1}..."
+                    val stepResult = reasoningEngine.planFollowUpStep(
+                        goal = input,
+                        completedSteps = completedStepNotes,
+                        screenContext = screenDesc,
+                        toolCatalogJson = toolCatalogJson
+                    )
+                    val (_, nextDecision) = stepResult.getOrElse { err ->
+                        traces += AgentStepTrace(traces.size + 1, "VERIFY", "Stopped autonomous loop: ${err.message}", false)
+                        break
+                    }
+                    if (nextDecision.thoughtSummary.isNotBlank()) {
+                        accumulatedThoughts += "Step ${cycle + 1}: ${nextDecision.thoughtSummary}"
+                    }
+                    if (nextDecision.plannedTools.isEmpty()) {
+                        if (nextDecision.directReply.isNotBlank()) {
+                            latestReply = nextDecision.directReply
+                        }
+                        break
+                    }
+                    val followPlan = taskPlanner.buildPlan(nextDecision)
+                    var anyUiAction = false
+                    for (call in followPlan) {
+                        if (stopRequested) break
+                        _liveStatus.value = "⚡ Step ${cycle + 1}: ${call.toolId.replace('_', ' ')}..."
+                        val res = taskExecutor.executeTool(call.toolId, call.args, userConfirmed = false)
+                        results += res
+                        completedStepNotes += "${call.toolId}(${call.args.values.joinToString(", ")}) -> ${res.summary}"
+                        traces += AgentStepTrace(traces.size + 1, "TOOL", "${call.toolId}: ${res.summary}", res.success)
+                        if (call.toolId in setOf("click_ui_element", "type_text", "scroll_screen", "press_back", "open_app")) {
+                            anyUiAction = true
+                        }
+                        if (res.requiresConfirmation) {
+                            _pendingConfirmation.value = PendingToolConfirmation(
+                                toolCall = call,
+                                promptMessage = "Confirm ${call.toolId.replace('_', ' ')}: ${call.args.entries.joinToString { "${it.key}=${it.value}" }}",
+                                originalUserRequest = input
+                            )
+                            awaitingConfirmation = true
+                            break
+                        }
+                    }
+                    if (nextDecision.directReply.isNotBlank()) {
+                        latestReply = nextDecision.directReply
+                    }
+                    if (awaitingConfirmation || !nextDecision.nextActionNeeded || !anyUiAction) {
+                        break
+                    }
+                    delay(550L)
+                }
+            }
+
+            if (stopRequested) {
+                traces += AgentStepTrace(traces.size + 1, "VERIFY", "Execution interrupted by user.", false)
+                latestReply = "Stopped as requested."
+            }
+
+            val verification = resultVerifier.verify(latestReply, results)
+            val missingPerm = extraMissingPerm ?: verification.missingPermission
+            val finalReply = if (extraMissingPerm != null && !verification.userReply.contains("Accessibility", ignoreCase = true)) {
+                latestReply
+            } else {
+                verification.userReply
+            }
+            traces += AgentStepTrace(
+                traces.size + 1,
+                "VERIFY",
+                if (verification.allSucceeded && extraMissingPerm == null) "Verified all steps" else "Completed with follow-up note",
+                verification.allSucceeded && extraMissingPerm == null
+            )
+
+            val combinedThought = accumulatedThoughts.distinct().joinToString("\n")
+            memoryManager.recordConversationTurn("user", input, intent.detectedLanguage)
+            memoryManager.recordConversationTurn(
+                role = "assistant",
+                content = finalReply,
+                languageTag = intent.detectedLanguage,
+                providerLabel = providerUsed,
+                thoughtSummary = combinedThought
+            )
+
+            if (initialDecision.memoryCandidateTitle.isNotBlank() && initialDecision.memoryCandidateContent.isNotBlank()) {
+                memoryManager.saveMemory(
+                    category = "PREFERENCE",
+                    title = initialDecision.memoryCandidateTitle,
+                    content = initialDecision.memoryCandidateContent,
+                    source = "ai_reasoning"
+                )
+            }
+
+            val report = AgentExecutionReport(
+                userInput = input,
+                providerUsed = providerUsed,
+                finalReply = finalReply,
+                steps = traces,
+                toolResults = results,
+                missingPermission = missingPerm,
+                thoughtSummary = combinedThought
+            )
+            _latestReport.value = report
+            return report
+        } finally {
+            _liveStatus.value = ""
+        }
     }
+
+    private data class StreamResult(
+        val provider: String,
+        val reply: String,
+        val thoughtSummary: String
+    )
 
     private suspend fun tryStreamConversation(
         input: String,
         history: List<Pair<String, String>>,
         memories: String,
         lang: String
-    ): Pair<String, String>? {
+    ): StreamResult? {
         val langLabel = when (lang) {
             "bn" -> "বাংলা"
             "hi" -> "हिन्दी"
@@ -192,14 +354,20 @@ class AgentManager(
         }
         return try {
             _isStreaming.value = true
-            var latestText = ""
+            var rawBuffer = ""
             modelRouter.streamConversation(contextualPrompt, history, langLabel).collect { partial ->
-                latestText = partial
-                _streamingReply.value = partial
+                rawBuffer = partial
+                val parsed = extractThoughtAndReply(partial)
+                if (parsed.second.isNotBlank()) {
+                    _streamingReply.value = parsed.second
+                } else if (parsed.first.isNotBlank()) {
+                    _liveStatus.value = "✦ Thinking: ${parsed.first.take(72)}..."
+                }
             }
             _isStreaming.value = false
             _streamingReply.value = ""
-            if (latestText.isBlank()) null else ("Online • Stream" to latestText.trim())
+            val (thought, visibleReply) = extractThoughtAndReply(rawBuffer)
+            if (visibleReply.isBlank()) null else StreamResult("Online • ChatGPT Brain", visibleReply, thought)
         } catch (e: CancellationException) {
             _isStreaming.value = false
             _streamingReply.value = ""
@@ -211,13 +379,31 @@ class AgentManager(
         }
     }
 
+    private fun extractThoughtAndReply(raw: String): Pair<String, String> {
+        val startTag = "<thought>"
+        val endTag = "</thought>"
+        val startIdx = raw.indexOf(startTag, ignoreCase = true)
+        if (startIdx == -1) {
+            return "" to raw.trim()
+        }
+        val endIdx = raw.indexOf(endTag, startIdx + startTag.length, ignoreCase = true)
+        return if (endIdx == -1) {
+            val thinkingInProgress = raw.substring(startIdx + startTag.length).trim()
+            thinkingInProgress to ""
+        } else {
+            val thought = raw.substring(startIdx + startTag.length, endIdx).trim()
+            val reply = raw.substring(endIdx + endTag.length).trim()
+            thought to reply
+        }
+    }
+
     private fun looksLikeActionRequest(input: String): Boolean {
         val lower = input.lowercase()
         return listOf(
             "open ", "launch ", "youtube", "volume", "mute", "flashlight", "torch",
             "bluetooth", "wifi", "wi-fi", "settings", "call ", "dial ", "sms", "message",
             "remind", "notification", "screen", "click", "tap", "scroll", "type ", "lock",
-            "search", "battery", "খোলো", "খুলে", "সার্চ", "কল", "भूल", "खोलो", "सर्च", "कॉल"
+            "search", "battery", "quick settings", "খোলো", "খুলে", "সার্চ", "কল", "खोलो", "सर्च", "कॉल"
         ).any { lower.contains(it) }
     }
 

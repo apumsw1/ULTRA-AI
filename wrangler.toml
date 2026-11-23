@@ -6,8 +6,13 @@ workers_dev = true
 [vars]
 DEFAULT_PROVIDER = "auto"
 OPENAI_MODEL = "gpt-4o-mini"
-GEMINI_MODEL = "gemini-2.5-flash"
-RATE_LIMIT_PER_MIN = "30"
+GEMINI_MODEL = "gemini-3.8-flash"
+CF_AI_MODEL = "@cf/meta/llama-3.1-8b-instruct"
+RATE_LIMIT_PER_MIN = "45"
+
+# Cloudflare Workers AI binding (Free Plan compatible — runs Llama/Mistral on Cloudflare edge without external API keys)
+[ai]
+binding = "AI"
 
 # Cloudflare D1 SQLite database binding (Free Plan compatible)
 # Create with: npx wrangler d1 create ultra_ai_db
@@ -24,7 +29,7 @@ migrations_dir = "migrations"
 binding = "ULTRA_KV"
 id = "REPLACE_WITH_KV_NAMESPACE_ID"
 
-# Configure encrypted secrets before deploying (never commit keys here):
+# Optional encrypted provider secrets (never commit keys here):
 # npx wrangler secret put GEMINI_API_KEY
 # npx wrangler secret put OPENAI_API_KEY
 # npx wrangler secret put ULTRA_AUTH_TOKEN

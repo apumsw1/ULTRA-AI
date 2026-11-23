@@ -108,4 +108,14 @@ class UltraCoreUnitTest {
         assertEquals(PermissionRequirement.ACCESSIBILITY, summary.missingPermission)
         assertTrue(summary.userReply.contains("Accessibility Service"))
     }
+
+    @Test
+    fun `intent engine normalizes noisy stt and detects compound multi-step actions`() {
+        assertEquals("open YouTube", IntentEngine.normalizeSpeechTranscript("open u tube"))
+        assertEquals("open wifi settings", IntentEngine.normalizeSpeechTranscript("open wi fi settings"))
+        assertTrue(IntentEngine.isCompoundAction("Open YouTube and search relaxing piano music"))
+        assertTrue(IntentEngine.isCompoundAction("YouTube খুলে গান সার্চ করো"))
+        assertFalse(IntentEngine.isCompoundAction("Open YouTube"))
+        assertEquals("bn", IntentEngine.detectLanguage("kemon acho tui?"))
+    }
 }

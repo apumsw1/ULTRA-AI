@@ -49,6 +49,7 @@ import com.ultra.assistant.R
 import com.ultra.assistant.control.DeviceInfoReport
 import com.ultra.assistant.data.AiOperatingMode
 import com.ultra.assistant.data.AiProviderMode
+import com.ultra.assistant.data.AiSpeedProfile
 import com.ultra.assistant.data.ChatBackgroundStyle
 import com.ultra.assistant.data.UltraSettings
 import com.ultra.assistant.data.UltraThemeStyle
@@ -74,10 +75,16 @@ fun SettingsScreen(
     deviceAdminExplanation: String,
     memories: List<MemoryRecordEntity>,
     sessions: List<ConversationSessionEntity>,
+    onlineDiagnostic: String,
+    workerHealthStatus: String?,
     onUpdateOperatingMode: (AiOperatingMode) -> Unit,
-    onUpdateAiConfig: (AiProviderMode, String, String) -> Unit,
+    onUpdateSpeedProfile: (AiSpeedProfile) -> Unit,
+    onUpdateAiConfig: (AiProviderMode, String, String, String) -> Unit,
+    onTestWorkerConnection: (String, String) -> Unit,
     onUpdateVoiceGender: (VoiceGender) -> Unit,
     onSelectLanguage: (String) -> Unit,
+    onUpdateLanguageAutoDetect: (Boolean) -> Unit,
+    onUpdateAutoSpeakChatReplies: (Boolean) -> Unit,
     onUpdateWakePhrase: (String) -> Unit,
     onUpdateVoiceTuning: (Float, Float) -> Unit,
     onUpdateVoiceVolume: (Float) -> Unit,
@@ -91,6 +98,7 @@ fun SettingsScreen(
     onClearAllMemories: () -> Unit,
     onStartNewChat: () -> Unit,
     onClearConversationHistory: () -> Unit,
+    onRequestAllRuntimePermissions: () -> Unit,
     onRequestContactsAndPhone: () -> Unit,
     onOpenMicAppSettings: () -> Unit,
     onOpenOverlaySettings: () -> Unit,
@@ -102,6 +110,7 @@ fun SettingsScreen(
     onSignOut: () -> Unit
 ) {
     var workerUrl by remember(settings.workerEndpoint) { mutableStateOf(settings.workerEndpoint) }
+    var workerToken by remember(settings.workerAuthToken) { mutableStateOf(settings.workerAuthToken) }
     var wakePhrase by remember(settings.wakePhrase) { mutableStateOf(settings.wakePhrase) }
     var speed by remember(settings.voiceSpeed) { mutableFloatStateOf(settings.voiceSpeed) }
     var pitch by remember(settings.voicePitch) { mutableFloatStateOf(settings.voicePitch) }
@@ -153,6 +162,28 @@ fun SettingsScreen(
                     }
                 }
 
+                Text("AI Speed & Thinking Profile", style = MaterialTheme.typography.labelMedium, color = ArcCyan)
+                Row(
+                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    AiSpeedProfile.entries.forEach { profile ->
+                        FilterChip(
+                            selected = settings.aiSpeedProfile == profile,
+                            onClick = { onUpdateSpeedProfile(profile) },
+                            label = {
+                                Text(
+                                    when (profile) {
+                                        AiSpeedProfile.TURBO -> "Turbo (Instant)"
+                                        AiSpeedProfile.BALANCED -> "Balanced"
+                                        AiSpeedProfile.DEEP_THINK -> "Deep Reasoning"
+                                    }
+                                )
+                            }
+                        )
+                    }
+                }
+
                 Text("AI Gateway Routing", style = MaterialTheme.typography.labelMedium, color = ArcCyan)
                 Row(
                     modifier = Modifier.horizontalScroll(rememberScrollState()),
@@ -161,13 +192,13 @@ fun SettingsScreen(
                     AiProviderMode.entries.forEach { mode ->
                         FilterChip(
                             selected = settings.aiProviderMode == mode,
-                            onClick = { onUpdateAiConfig(mode, settings.geminiModel, workerUrl) },
+                            onClick = { onUpdateAiConfig(mode, settings.geminiModel, workerUrl, workerToken) },
                             label = {
                                 Text(
                                     when (mode) {
                                         AiProviderMode.AUTO -> "Auto"
                                         AiProviderMode.FIREBASE_AI -> "Gemini"
-                                        AiProviderMode.CLOUDFLARE_WORKER -> "Worker"
+                                        AiProviderMode.CLOUDFLARE_WORKER -> "Cloudflare"
                                     }
                                 )
                             }
@@ -183,7 +214,7 @@ fun SettingsScreen(
                     listOf("gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-4-argon").forEach { modelId ->
                         FilterChip(
                             selected = settings.geminiModel == modelId,
-                            onClick = { onUpdateAiConfig(settings.aiProviderMode, modelId, workerUrl) },
+                            onClick = { onUpdateAiConfig(settings.aiProviderMode, modelId, workerUrl, workerToken) },
                             label = { Text(modelId.removePrefix("gemini-")) }
                         )
                     }
@@ -192,17 +223,44 @@ fun SettingsScreen(
                 OutlinedTextField(
                     value = workerUrl,
                     onValueChange = { workerUrl = it },
-                    label = { Text("Cloudflare Worker URL") },
+                    label = { Text("Cloudflare Worker URL (Free Plan Ready)") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
-                Button(
-                    onClick = { onUpdateAiConfig(settings.aiProviderMode, settings.geminiModel, workerUrl) },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(48.dp)
-                ) {
-                    Text("Save AI Brain Config")
+                OutlinedTextField(
+                    value = workerToken,
+                    onValueChange = { workerToken = it },
+                    label = { Text("Worker Bearer Token (Optional)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                if (!workerHealthStatus.isNullOrBlank() || onlineDiagnostic.isNotBlank()) {
+                    Text(
+                        text = workerHealthStatus ?: "Online Status: $onlineDiagnostic",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if ((workerHealthStatus ?: onlineDiagnostic).contains("OK", true) ||
+                            (workerHealthStatus ?: onlineDiagnostic).contains("Connected", true)
+                        ) EmeraldVerified else AmberWarning
+                    )
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = { onUpdateAiConfig(settings.aiProviderMode, settings.geminiModel, workerUrl, workerToken) },
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp)
+                    ) {
+                        Text("Save AI Config")
+                    }
+                    OutlinedButton(
+                        onClick = { onTestWorkerConnection(workerUrl, workerToken) },
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp)
+                            .testTag("settings_test_worker_button")
+                    ) {
+                        Text("Test Cloudflare")
+                    }
                 }
             }
         }
@@ -293,6 +351,16 @@ fun SettingsScreen(
                     onValueChangeFinished = { onUpdateVoiceVolume(volume) }
                 )
 
+                SettingsSwitchRow(
+                    label = "Auto-Detect Multilingual Speech (EN/BN/HI)",
+                    checked = settings.languageAutoDetect,
+                    onCheckedChange = onUpdateLanguageAutoDetect
+                )
+                SettingsSwitchRow(
+                    label = "Auto-Speak Typed Chat Replies",
+                    checked = settings.autoSpeakChatReplies,
+                    onCheckedChange = onUpdateAutoSpeakChatReplies
+                )
                 SettingsSwitchRow(
                     label = "Continuous Voice Listening",
                     checked = settings.continuousListening,
@@ -408,6 +476,15 @@ fun SettingsScreen(
         item {
             HudCard {
                 Text("Permissions & System Access", style = MaterialTheme.typography.titleMedium)
+                Button(
+                    onClick = onRequestAllRuntimePermissions,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .testTag("settings_grant_runtime_permissions")
+                ) {
+                    Text("Grant All Runtime Permissions")
+                }
                 PermissionRow(
                     title = "Microphone & Notifications",
                     granted = permissions.microphoneGranted && permissions.notificationsGranted,

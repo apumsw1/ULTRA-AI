@@ -1,7 +1,7 @@
 /**
  * ULTRA AI — Cloudflare Worker Gateway & Agent Control Plane
- * Free Plan compatible: pure Web Standard Fetch + optional D1 SQLite + optional KV rate limiting.
- * Preserves backward compatibility with GET /health and POST /api/voice from ULTRA-AI-Assistant.
+ * Free Plan compatible: supports Cloudflare Workers AI (`env.AI`), Gemini REST, OpenAI,
+ * plus optional D1 SQLite & KV rate limiting.
  */
 
 const CORS_HEADERS = {
@@ -12,7 +12,7 @@ const CORS_HEADERS = {
 };
 
 /**
- * Canonical 13-tool schema registry mirrored with Android ToolRegistry.kt.
+ * Canonical 19-tool schema registry mirrored with Android ToolRegistry.kt.
  */
 const TOOL_SCHEMAS = {
   open_app: {
@@ -20,6 +20,45 @@ const TOOL_SCHEMAS = {
     required: ["appName"],
     optional: [],
     description: "Launch an installed Android application by name or package ID."
+  },
+  search_youtube: {
+    riskLevel: "LOW",
+    required: ["query"],
+    optional: [],
+    description: "Search YouTube videos or channels."
+  },
+  control_media_volume: {
+    riskLevel: "LOW",
+    required: [],
+    anyOf: ["volumeAction", "mediaAction"],
+    optional: ["volumeAction", "levelPercent", "mediaAction"],
+    description: "Control media volume (up/down/mute/unmute/set) or playback (play/pause/play_pause/next/previous/stop)."
+  },
+  toggle_flashlight: {
+    riskLevel: "LOW",
+    required: [],
+    optional: ["state"],
+    enumValues: { state: ["on", "off", "toggle"] },
+    description: "Turn device flashlight on, off, or toggle."
+  },
+  open_device_settings: {
+    riskLevel: "LOW",
+    required: ["target"],
+    optional: [],
+    description: "Open Android settings/panels: wifi, bluetooth, network, sound, brightness, notifications, battery, main."
+  },
+  make_phone_call: {
+    riskLevel: "HIGH",
+    required: ["target"],
+    optional: ["directCall"],
+    description: "Look up a contact or number and dial/call after confirmation."
+  },
+  navigate_system: {
+    riskLevel: "LOW",
+    required: ["action"],
+    optional: [],
+    enumValues: { action: ["home", "recents", "notifications", "back", "quick_settings", "lock_screen"] },
+    description: "Global Android system navigation via Accessibility."
   },
   get_accessible_screen: {
     riskLevel: "MEDIUM",
@@ -37,8 +76,8 @@ const TOOL_SCHEMAS = {
   type_text: {
     riskLevel: "MEDIUM",
     required: ["text"],
-    optional: ["targetField"],
-    description: "Enter text into an editable non-password field."
+    optional: ["targetField", "submit"],
+    description: "Enter text into an editable non-password field and optionally submit."
   },
   scroll_screen: {
     riskLevel: "LOW",
@@ -75,8 +114,8 @@ const TOOL_SCHEMAS = {
     riskLevel: "LOW",
     required: ["query"],
     optional: ["platform"],
-    enumValues: { platform: ["google", "youtube_music", "music"] },
-    description: "Search Google or YouTube Music."
+    enumValues: { platform: ["google", "youtube", "youtube_music", "music"] },
+    description: "Search Google, YouTube, or YouTube Music."
   },
   get_device_information: {
     riskLevel: "LOW",
@@ -189,7 +228,7 @@ function normalizeAndFilterToolCalls(rawToolCalls) {
 
 async function checkRateLimit(request, env) {
   if (!env.ULTRA_KV) return { allowed: true, remaining: null };
-  const limit = Math.max(5, Number(env.RATE_LIMIT_PER_MIN || 30));
+  const limit = Math.max(5, Number(env.RATE_LIMIT_PER_MIN || 45));
   const ip = request.headers.get("CF-Connecting-IP") || "anonymous";
   const minuteBucket = Math.floor(Date.now() / 60000);
   const key = `rl:${ip}:${minuteBucket}`;
@@ -215,18 +254,43 @@ function isAuthorized(request, env) {
   return token.length > 0 && token === configuredToken;
 }
 
-function buildSystemPrompt(language) {
+function buildSystemPrompt(language, toolsJson, screenContext) {
+  const screenNote = screenContext ? `\nLive Android Screen UI:\n${String(screenContext).slice(0, 1800)}` : "";
+  const toolsNote = toolsJson && toolsJson !== "[]" ? `\nAvailable Android Tools:\n${String(toolsJson).slice(0, 3500)}` : "";
   return (
-    "You are ULTRA AI, a JARVIS-style multilingual Android agent. " +
-    `Preferred user language: ${language || "English"}. Understand Bengali, Hindi, and English. ` +
-    "Reply in the same language as the user, concisely, warmly, and without Markdown in spoken replies. " +
+    "You are ULTRA AI — a hybrid JARVIS Android Device Agent + ChatGPT conversational companion. " +
+    `Preferred language: ${language || "English"}. Fluently understand Bengali (বাংলা), Hindi (हिन्दी), Banglish, Hinglish, and English. ` +
+    "Think analytically step-by-step before replying. In 'thoughtSummary', briefly explain your reasoning, intent analysis, and context links. " +
+    "Respond naturally and warmly like a human conversation, without unnecessary Markdown symbols. " +
     "Never claim you completed a device action unless you include a valid toolCall from the registered tools. " +
+    "Set 'nextActionNeeded': true ONLY when the app must first open or transition so ULTRA can inspect the live screen next. " +
     "Return valid JSON only with shape: " +
-    '{"thoughtSummary":"...","reply":"...","toolCalls":[{"toolId":"...","rationale":"...","argsJson":"{...}"}]}'
+    '{"thoughtSummary":"...","reply":"...","nextActionNeeded":false,"toolCalls":[{"toolId":"...","rationale":"...","argsJson":"{...}"}]}' +
+    screenNote +
+    toolsNote
   );
 }
 
-async function callOpenAI(env, message, history, language) {
+async function callWorkersAI(env, message, history, language, toolsJson, screenContext) {
+  const model = env.CF_AI_MODEL || "@cf/meta/llama-3.1-8b-instruct";
+  const messages = [
+    { role: "system", content: buildSystemPrompt(language, toolsJson, screenContext) },
+    ...history.map((h) => ({
+      role: h.role === "model" ? "assistant" : h.role,
+      content: h.content
+    })),
+    { role: "user", content: message }
+  ];
+  const res = await env.AI.run(model, {
+    messages,
+    max_tokens: 700,
+    temperature: 0.45
+  });
+  const text = typeof res?.response === "string" ? res.response : JSON.stringify(res || {});
+  return { provider: `cloudflare-ai:${model}`, rawText: text.trim() };
+}
+
+async function callOpenAI(env, message, history, language, toolsJson, screenContext) {
   const model = env.OPENAI_MODEL || "gpt-4o-mini";
   const response = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
@@ -236,9 +300,9 @@ async function callOpenAI(env, message, history, language) {
     },
     body: JSON.stringify({
       model,
-      instructions: buildSystemPrompt(language),
+      instructions: buildSystemPrompt(language, toolsJson, screenContext),
       input: [...history, { role: "user", content: message }],
-      max_output_tokens: 360,
+      max_output_tokens: 650,
       store: false
     })
   });
@@ -263,8 +327,8 @@ async function callOpenAI(env, message, history, language) {
   return { provider: `openai:${model}`, rawText: text.trim() };
 }
 
-async function callGeminiRest(env, message, history, language) {
-  const model = env.GEMINI_MODEL || "gemini-2.5-flash";
+async function callGeminiRest(env, message, history, language, toolsJson, screenContext) {
+  const model = env.GEMINI_MODEL || "gemini-3.8-flash";
   const contents = [
     ...history.map((h) => ({
       role: h.role === "assistant" ? "model" : "user",
@@ -277,11 +341,11 @@ async function callGeminiRest(env, message, history, language) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      systemInstruction: { parts: [{ text: buildSystemPrompt(language) }] },
+      systemInstruction: { parts: [{ text: buildSystemPrompt(language, toolsJson, screenContext) }] },
       contents,
       generationConfig: {
         responseMimeType: "application/json",
-        maxOutputTokens: 360
+        maxOutputTokens: 700
       }
     })
   });
@@ -295,20 +359,22 @@ async function callGeminiRest(env, message, history, language) {
 
 function parseModelOutput(rawText) {
   if (!rawText) {
-    return { thoughtSummary: "Empty output", reply: "Please try again.", toolCalls: [] };
+    return { thoughtSummary: "Empty output", reply: "Please try again.", nextActionNeeded: false, toolCalls: [] };
   }
   const cleaned = rawText.replace(/^```json\s*/i, "").replace(/```$/i, "").trim();
   try {
     const obj = JSON.parse(cleaned);
     return {
-      thoughtSummary: String(obj.thoughtSummary || "Gateway reasoning complete").slice(0, 300),
+      thoughtSummary: String(obj.thoughtSummary || "Gateway reasoning complete").slice(0, 400),
       reply: String(obj.reply || "Ready.").trim(),
+      nextActionNeeded: Boolean(obj.nextActionNeeded),
       toolCalls: normalizeAndFilterToolCalls(obj.toolCalls)
     };
   } catch {
     return {
-      thoughtSummary: "Conversational reply",
-      reply: rawText.slice(0, 1200),
+      thoughtSummary: "Direct conversational response",
+      reply: rawText.slice(0, 1800),
+      nextActionNeeded: false,
       toolCalls: []
     };
   }
@@ -347,10 +413,11 @@ export default {
       return reply({
         ok: true,
         service: "ULTRA AI Voice & Agent Gateway",
-        version: "2.0.0",
+        version: "2.2.0",
         d1Configured: Boolean(env.DB),
         kvConfigured: Boolean(env.ULTRA_KV),
         providers: {
+          workersAi: Boolean(env.AI),
           openai: Boolean(env.OPENAI_API_KEY),
           gemini: Boolean(env.GEMINI_API_KEY)
         }
@@ -473,11 +540,11 @@ export default {
       return reply({ ok: false, error: "Rate limit exceeded. Retry in a minute.", limit: rate.limit }, 429);
     }
 
-    if (!env.OPENAI_API_KEY && !env.GEMINI_API_KEY) {
-      logStructured("error", "missing_ai_secrets");
+    if (!env.AI && !env.OPENAI_API_KEY && !env.GEMINI_API_KEY) {
+      logStructured("error", "missing_ai_providers");
       return reply({
         ok: false,
-        error: "Worker AI provider keys are not configured. Set OPENAI_API_KEY or GEMINI_API_KEY via wrangler secret."
+        error: "Configure Cloudflare Workers AI [ai] binding or GEMINI_API_KEY/OPENAI_API_KEY secret."
       }, 503);
     }
 
@@ -495,7 +562,7 @@ export default {
     const language = String(data.language || "English").slice(0, 40);
     const history = Array.isArray(data.history)
       ? data.history
-          .slice(-8)
+          .slice(-10)
           .filter((x) => x && ["user", "assistant", "model"].includes(x.role) && typeof x.content === "string")
           .map((x) => ({
             role: x.role === "model" ? "assistant" : x.role,
@@ -505,23 +572,31 @@ export default {
 
     const preferred = String(data.provider || env.DEFAULT_PROVIDER || "auto").toLowerCase();
     const attempts = [];
-    if (preferred === "gemini") {
+    if (preferred === "cloudflare") {
+      if (env.AI) attempts.push("workersai");
       if (env.GEMINI_API_KEY) attempts.push("gemini");
       if (env.OPENAI_API_KEY) attempts.push("openai");
     } else if (preferred === "openai") {
       if (env.OPENAI_API_KEY) attempts.push("openai");
       if (env.GEMINI_API_KEY) attempts.push("gemini");
+      if (env.AI) attempts.push("workersai");
     } else {
       if (env.GEMINI_API_KEY) attempts.push("gemini");
       if (env.OPENAI_API_KEY) attempts.push("openai");
+      if (env.AI) attempts.push("workersai");
     }
+
+    const toolsJson = typeof data.tools === "string" ? data.tools : JSON.stringify(data.tools || []);
+    const screenContext = typeof data.screenContext === "string" ? data.screenContext : "";
 
     let lastError = null;
     for (const provider of attempts) {
       try {
         const result = provider === "gemini"
-          ? await callGeminiRest(env, message, history, language)
-          : await callOpenAI(env, message, history, language);
+          ? await callGeminiRest(env, message, history, language, toolsJson, screenContext)
+          : provider === "openai"
+            ? await callOpenAI(env, message, history, language, toolsJson, screenContext)
+            : await callWorkersAI(env, message, history, language, toolsJson, screenContext);
         const decision = parseModelOutput(result.rawText);
         await recordAuditSafe(env, {
           userId: data.userId || "device",
@@ -535,6 +610,7 @@ export default {
           provider: result.provider,
           reply: decision.reply,
           thoughtSummary: decision.thoughtSummary,
+          nextActionNeeded: decision.nextActionNeeded,
           toolCalls: decision.toolCalls,
           rateRemaining: rate.remaining
         });

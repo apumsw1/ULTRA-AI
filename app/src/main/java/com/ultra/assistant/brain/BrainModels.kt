@@ -44,7 +44,8 @@ data class ReasoningDecision(
     val directReply: String,
     val plannedTools: List<PlannedToolCall>,
     val memoryCandidateTitle: String = "",
-    val memoryCandidateContent: String = ""
+    val memoryCandidateContent: String = "",
+    val nextActionNeeded: Boolean = false
 )
 
 data class AgentStepTrace(
@@ -61,7 +62,8 @@ data class AgentExecutionReport(
     val steps: List<AgentStepTrace>,
     val toolResults: List<ToolExecutionResult>,
     val missingPermission: PermissionRequirement? = null,
-    val timestampMillis: Long = System.currentTimeMillis()
+    val timestampMillis: Long = System.currentTimeMillis(),
+    val thoughtSummary: String = ""
 )
 
 data class PendingToolConfirmation(

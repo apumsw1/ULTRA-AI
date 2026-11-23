@@ -15,7 +15,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         AuditLogEntity::class,
         AutomationRuleEntity::class
     ],
-    version = 2,
+    version = 3,
     exportSchema = false
 )
 abstract class UltraDatabase : RoomDatabase() {
@@ -50,6 +50,14 @@ abstract class UltraDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE `conversation_messages` ADD COLUMN `thoughtSummary` TEXT NOT NULL DEFAULT ''"
+                )
+            }
+        }
+
         fun getInstance(context: Context): UltraDatabase {
             return instance ?: synchronized(this) {
                 instance ?: Room.databaseBuilder(
@@ -57,7 +65,7 @@ abstract class UltraDatabase : RoomDatabase() {
                     UltraDatabase::class.java,
                     "ultra_ai_memory.db"
                 )
-                    .addMigrations(MIGRATION_1_2)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                     .build()
                     .also { instance = it }
             }

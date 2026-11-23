@@ -30,6 +30,7 @@ data class ConversationMessageEntity(
     val content: String,
     val languageTag: String = "en-US",
     val providerLabel: String = "",
+    val thoughtSummary: String = "",
     val timestampMillis: Long = System.currentTimeMillis()
 )
 

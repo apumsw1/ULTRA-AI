@@ -18,12 +18,12 @@ class ScreenController(private val context: Context) {
         return Result.success(snapshot)
     }
 
-    fun describeScreenConcise(): Result<String> {
+    fun describeScreenConcise(maxNodes: Int = 30): Result<String> {
         return inspectScreen().map { snap ->
             if (snap.elements.isEmpty()) {
                 "Active package: ${snap.packageName} (${snap.windowTitle}). No readable controls exposed."
             } else {
-                val preview = snap.elements.take(15).joinToString("; ") { elem ->
+                val preview = snap.elements.take(maxNodes).joinToString("; ") { elem ->
                     val label = elem.text.ifBlank { elem.contentDescription }.ifBlank { elem.viewId.substringAfterLast('/') }
                     val flags = buildList {
                         if (elem.clickable) add("clickable")
@@ -43,10 +43,10 @@ class ScreenController(private val context: Context) {
         return service.clickByTextOrId(text, viewId)
     }
 
-    fun typeText(target: String, text: String, viewId: String = ""): AccessibilityActionResult {
+    fun typeText(target: String, text: String, viewId: String = "", submit: Boolean = false): AccessibilityActionResult {
         val service = UltraAccessibilityService.getInstance()
             ?: return AccessibilityActionResult(false, "Accessibility Service is disabled. Please enable it in Settings.")
-        return service.setTextOnField(target, text, viewId)
+        return service.setTextOnField(target, text, viewId, submit)
     }
 
     fun scroll(direction: String): AccessibilityActionResult {

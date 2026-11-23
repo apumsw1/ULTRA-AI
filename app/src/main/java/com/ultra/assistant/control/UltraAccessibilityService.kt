@@ -118,7 +118,12 @@ class UltraAccessibilityService : AccessibilityService() {
         }
     }
 
-    fun setTextOnField(targetQuery: String, textToEnter: String, viewId: String = ""): AccessibilityActionResult {
+    fun setTextOnField(
+        targetQuery: String,
+        textToEnter: String,
+        viewId: String = "",
+        submit: Boolean = false
+    ): AccessibilityActionResult {
         val root = rootInActiveWindow ?: return AccessibilityActionResult(false, "No active window available.")
         val pkg = root.packageName?.toString().orEmpty()
         if (isProtectedPackage(pkg)) {
@@ -129,7 +134,7 @@ class UltraAccessibilityService : AccessibilityService() {
         } else {
             findMatchingNode(root, targetQuery, viewId)?.let { matched ->
                 if (matched.isEditable) matched else findFirstEditableNode(matched) ?: findFirstEditableNode(root)
-            }
+            } ?: findFirstEditableNode(root)
         } ?: return AccessibilityActionResult(false, "No editable text field found on screen.")
 
         if (target.isPassword) {
@@ -137,17 +142,40 @@ class UltraAccessibilityService : AccessibilityService() {
         }
 
         target.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+        target.performAction(AccessibilityNodeInfo.ACTION_CLICK)
         val args = Bundle().apply {
             putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, textToEnter)
         }
         val ok = target.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
         val hint = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) target.hintText?.toString() else null
         val label = target.viewIdResourceName ?: hint ?: "text field"
-        return if (ok) {
-            AccessibilityActionResult(true, "Entered text into $label.", label)
-        } else {
-            AccessibilityActionResult(false, "Failed to set text on $label.")
+        if (!ok) {
+            return AccessibilityActionResult(false, "Failed to set text on $label.")
         }
+        var submittedNote = ""
+        if (submit) {
+            val imeSubmitted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                target.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)
+            } else {
+                false
+            }
+            if (imeSubmitted) {
+                submittedNote = " and submitted"
+            } else {
+                val submitNode = listOf("Search", "Send", "Go", "Submit", "Done", "খুঁজুন")
+                    .firstNotNullOfOrNull { btnLabel -> findMatchingNode(root, btnLabel, "") }
+                if (submitNode != null) {
+                    var clickTarget: AccessibilityNodeInfo? = submitNode
+                    while (clickTarget != null && !clickTarget.isClickable) {
+                        clickTarget = clickTarget.parent
+                    }
+                    if ((clickTarget ?: submitNode).performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                        submittedNote = " and clicked submit"
+                    }
+                }
+            }
+        }
+        return AccessibilityActionResult(true, "Entered text into $label$submittedNote.", label)
     }
 
     fun scrollScreen(direction: String): AccessibilityActionResult {
@@ -180,17 +208,26 @@ class UltraAccessibilityService : AccessibilityService() {
     }
 
     fun performSystemNavigation(target: String): AccessibilityActionResult {
-        val action = when (target.lowercase()) {
+        val normalized = target.lowercase().trim()
+        val action = when (normalized) {
             "home" -> GLOBAL_ACTION_HOME
             "recents", "recent", "apps", "overview" -> GLOBAL_ACTION_RECENTS
             "notifications", "notification_shade" -> GLOBAL_ACTION_NOTIFICATIONS
+            "quick_settings", "quicksettings" -> GLOBAL_ACTION_QUICK_SETTINGS
+            "lock_screen", "lockscreen", "lock" -> {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    GLOBAL_ACTION_LOCK_SCREEN
+                } else {
+                    return AccessibilityActionResult(false, "Lock screen via Accessibility requires Android 9+.")
+                }
+            }
             else -> GLOBAL_ACTION_BACK
         }
         val ok = performGlobalAction(action)
         return if (ok) {
-            AccessibilityActionResult(true, "Performed system navigation: ${target.lowercase()}.")
+            AccessibilityActionResult(true, "Performed system navigation: $normalized.")
         } else {
-            AccessibilityActionResult(false, "System navigation '${target.lowercase()}' failed.")
+            AccessibilityActionResult(false, "System navigation '$normalized' failed.")
         }
     }
 
@@ -237,22 +274,62 @@ class UltraAccessibilityService : AccessibilityService() {
         query: String,
         viewId: String
     ): AccessibilityNodeInfo? {
-        if (node.isPassword) return null
         val q = query.trim()
-        val idMatch = viewId.isNotBlank() && node.viewIdResourceName?.contains(viewId, ignoreCase = true) == true
-        val textMatch = q.isNotBlank() && (
-            node.text?.toString()?.contains(q, ignoreCase = true) == true ||
-                node.contentDescription?.toString()?.contains(q, ignoreCase = true) == true ||
-                (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
-                    node.hintText?.toString()?.contains(q, ignoreCase = true) == true)
-            )
-        if (idMatch || textMatch) return node
-        for (i in 0 until node.childCount) {
-            val child = node.getChild(i) ?: continue
-            val found = findMatchingNode(child, query, viewId)
-            if (found != null) return found
+        val queryTokens = q.lowercase().split(Regex("\\s+")).filter { it.length >= 2 }
+        var bestNode: AccessibilityNodeInfo? = null
+        var bestScore = 0
+
+        fun evaluate(current: AccessibilityNodeInfo) {
+            if (current.isPassword) return
+            val resId = current.viewIdResourceName.orEmpty()
+            val text = current.text?.toString()?.trim().orEmpty()
+            val desc = current.contentDescription?.toString()?.trim().orEmpty()
+            val hint = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                current.hintText?.toString()?.trim().orEmpty()
+            } else {
+                ""
+            }
+
+            var score = 0
+            if (viewId.isNotBlank() && resId.contains(viewId, ignoreCase = true)) {
+                score = maxOf(score, if (resId.equals(viewId, ignoreCase = true)) 120 else 95)
+            }
+            if (q.isNotBlank()) {
+                val candidates = listOf(text, desc, hint)
+                for (candidate in candidates) {
+                    if (candidate.isBlank()) continue
+                    when {
+                        candidate.equals(q, ignoreCase = true) -> score = maxOf(score, 110)
+                        candidate.contains(q, ignoreCase = true) -> score = maxOf(score, 85)
+                        queryTokens.isNotEmpty() -> {
+                            val lowered = candidate.lowercase()
+                            val matchedTokens = queryTokens.count { lowered.contains(it) }
+                            if (matchedTokens > 0) {
+                                val ratioScore = (matchedTokens * 65) / queryTokens.size
+                                score = maxOf(score, ratioScore)
+                            }
+                        }
+                    }
+                }
+                if (score == 0 && resId.contains(q, ignoreCase = true)) {
+                    score = 70
+                }
+            }
+            if (score > 0) {
+                if (current.isClickable || current.isEditable) score += 8
+                if (score > bestScore) {
+                    bestScore = score
+                    bestNode = current
+                }
+            }
+            for (i in 0 until current.childCount) {
+                val child = current.getChild(i) ?: continue
+                evaluate(child)
+            }
         }
-        return null
+
+        evaluate(node)
+        return bestNode
     }
 
     private fun findFirstEditableNode(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {

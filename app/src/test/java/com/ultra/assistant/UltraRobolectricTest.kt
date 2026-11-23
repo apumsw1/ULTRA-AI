@@ -140,4 +140,49 @@ class UltraRobolectricTest {
         assertTrue(browser.openUrl("file:///etc/passwd").isFailure)
         assertTrue(browser.openUrl("").isFailure)
     }
+
+    @Test
+    fun `offline assistant handles chained math percentages and unit conversions`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val settingsRepo = LocalSettingsRepository(context)
+        val memoryMgr = MemoryManager(context, settingsRepo, CloudSyncRepository(context))
+        val offlineEngine = OfflineAssistantEngine(context, memoryMgr)
+        val intentEngine = IntentEngine()
+
+        val chainIntent = intentEngine.classify("calculate 10 + 5 * 2")
+        val (_, chainDecision) = offlineEngine.respond("calculate 10 + 5 * 2", chainIntent, null)
+        assertTrue(chainDecision.directReply.contains("20"))
+
+        val pctIntent = intentEngine.classify("20% of 500")
+        val (_, pctDecision) = offlineEngine.respond("20% of 500", pctIntent, null)
+        assertTrue(pctDecision.directReply.contains("100"))
+
+        val convIntent = intentEngine.classify("10 km to miles")
+        val (_, convDecision) = offlineEngine.respond("10 km to miles", convIntent, null)
+        assertTrue(convDecision.directReply.contains("6.21"))
+    }
+
+    @Test
+    fun `type text tool supports submit param and memory records thought summary`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val settingsRepo = LocalSettingsRepository(context)
+        val memoryMgr = MemoryManager(context, settingsRepo, CloudSyncRepository(context))
+        val registry = ToolRegistry(context, memoryMgr, settingsRepo)
+
+        val typeTool = registry.getTool("type_text")!!
+        assertTrue(typeTool.parameters.any { it.name == "submit" })
+        val navTool = registry.getTool("navigate_system")!!
+        assertTrue(navTool.description.contains("quick_settings"))
+
+        memoryMgr.recordConversationTurn(
+            role = "assistant",
+            content = "Opened YouTube and searched.",
+            languageTag = "en",
+            providerLabel = "Online • gemini-3.8-flash",
+            thoughtSummary = "Step 1: Open YouTube\nStep 2: Type search query"
+        )
+        val msg = memoryMgr.getRecentConversation(5).lastOrNull()
+        assertNotNull(msg)
+        assertTrue(msg!!.thoughtSummary.contains("Step 1"))
+    }
 }

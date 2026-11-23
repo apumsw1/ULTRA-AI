@@ -23,6 +23,7 @@ import com.ultra.assistant.control.SmsController
 import com.ultra.assistant.control.UltraAccessibilityService
 import com.ultra.assistant.data.AiOperatingMode
 import com.ultra.assistant.data.AiProviderMode
+import com.ultra.assistant.data.AiSpeedProfile
 import com.ultra.assistant.data.ChatBackgroundStyle
 import com.ultra.assistant.data.LocalSettingsRepository
 import com.ultra.assistant.data.NetworkMonitor
@@ -43,6 +44,7 @@ import com.ultra.assistant.tools.ToolExecutionResult
 import com.ultra.assistant.tools.UltraTool
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -109,11 +111,18 @@ class UltraViewModel(
     val pendingConfirmation: StateFlow<PendingToolConfirmation?> = agentManager.pendingConfirmationFlow
     val streamingReply: StateFlow<String> = agentManager.streamingReplyFlow
     val isStreaming: StateFlow<Boolean> = agentManager.isStreamingFlow
+    val liveAgentStatus: StateFlow<String> = agentManager.liveStatusFlow
+    val onlineDiagnostic: StateFlow<String> = agentManager.modelRouter.onlineDiagnosticFlow
     val notifications: StateFlow<List<CapturedNotification>> = NotificationRepository.notificationsFlow
     val screenSnapshot: StateFlow<AccessibleScreenSnapshot?> = UltraAccessibilityService.latestSnapshotFlow
 
     private val _isAgentBusy = MutableStateFlow(false)
     val isAgentBusy: StateFlow<Boolean> = _isAgentBusy.asStateFlow()
+
+    private val _workerHealthStatus = MutableStateFlow<String?>(null)
+    val workerHealthStatus: StateFlow<String?> = _workerHealthStatus.asStateFlow()
+
+    private var activeCommandJob: Job? = null
 
     private val _installedApps = MutableStateFlow<List<InstalledAppInfo>>(emptyList())
     val installedApps: StateFlow<List<InstalledAppInfo>> = _installedApps.asStateFlow()
@@ -146,7 +155,7 @@ class UltraViewModel(
     fun submitCommand(input: String, onFinished: ((AgentExecutionReport) -> Unit)? = null) {
         val clean = input.trim()
         if (clean.isBlank() || _isAgentBusy.value) return
-        viewModelScope.launch {
+        activeCommandJob = viewModelScope.launch {
             _isAgentBusy.value = true
             try {
                 val report = agentManager.handleUserCommand(clean)
@@ -160,6 +169,13 @@ class UltraViewModel(
                 refreshSystemState()
             }
         }
+    }
+
+    fun stopAgentExecution() {
+        agentManager.requestStop()
+        activeCommandJob?.cancel()
+        activeCommandJob = null
+        _isAgentBusy.value = false
     }
 
     fun startNewConversation() {
@@ -355,6 +371,27 @@ class UltraViewModel(
         }
     }
 
+    fun updateSpeedProfile(profile: AiSpeedProfile) {
+        viewModelScope.launch {
+            settingsRepository.updateSettings {
+                it.copy(aiSpeedProfile = profile, geminiModel = profile.modelId)
+            }
+            _statusBanner.value = "AI Brain speed set to ${profile.label}."
+        }
+    }
+
+    fun updateLanguageAutoDetect(enabled: Boolean) {
+        viewModelScope.launch {
+            settingsRepository.updateSettings { it.copy(languageAutoDetect = enabled) }
+        }
+    }
+
+    fun updateAutoSpeakChatReplies(enabled: Boolean) {
+        viewModelScope.launch {
+            settingsRepository.updateSettings { it.copy(autoSpeakChatReplies = enabled) }
+        }
+    }
+
     fun updateAppearanceConfig(
         backgroundStyle: ChatBackgroundStyle,
         themeStyle: UltraThemeStyle,
@@ -387,12 +424,35 @@ class UltraViewModel(
         }
     }
 
-    fun updateAiConfig(mode: AiProviderMode, geminiModel: String, workerUrl: String) {
+    fun updateAiConfig(
+        mode: AiProviderMode,
+        geminiModel: String,
+        workerUrl: String,
+        workerToken: String = settings.value.workerAuthToken
+    ) {
+        val matchingProfile = AiSpeedProfile.entries.firstOrNull { it.modelId == geminiModel }
+            ?: settings.value.aiSpeedProfile
         viewModelScope.launch {
             settingsRepository.updateSettings {
-                it.copy(aiProviderMode = mode, geminiModel = geminiModel, workerEndpoint = workerUrl)
+                it.copy(
+                    aiProviderMode = mode,
+                    aiSpeedProfile = matchingProfile,
+                    geminiModel = geminiModel,
+                    workerEndpoint = workerUrl,
+                    workerAuthToken = workerToken
+                )
             }
             _statusBanner.value = "AI Brain configuration updated."
+        }
+    }
+
+    fun testWorkerConnection(workerUrl: String, workerToken: String) {
+        viewModelScope.launch {
+            _workerHealthStatus.value = "Testing Cloudflare Worker..."
+            val res = agentManager.modelRouter.testWorkerHealth(workerUrl, workerToken)
+            val msg = res.getOrElse { "Failed: ${it.message ?: "unreachable"}" }
+            _workerHealthStatus.value = msg
+            _statusBanner.value = msg
         }
     }
 

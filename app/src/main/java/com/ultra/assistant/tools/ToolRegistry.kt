@@ -246,9 +246,9 @@ class ToolRegistry(
     private inner class NavigateSystemTool : UltraTool {
         override val id = "navigate_system"
         override val title = "System Navigation"
-        override val description = "Perform global Android navigation: 'home', 'recents', 'notifications', or 'back'."
+        override val description = "Perform global Android navigation: 'home', 'recents', 'notifications', 'quick_settings', 'lock_screen', or 'back'."
         override val parameters = listOf(
-            ToolParamSpec("action", "string", "'home', 'recents', 'notifications', or 'back'", required = true)
+            ToolParamSpec("action", "string", "'home', 'recents', 'notifications', 'quick_settings', 'lock_screen', or 'back'", required = true)
         )
         override val requiredPermissions = listOf(PermissionRequirement.ACCESSIBILITY)
         override val riskLevel = RiskLevel.LOW
@@ -329,7 +329,8 @@ class ToolRegistry(
         override val description = "Enter text into an editable non-password field on the active screen."
         override val parameters = listOf(
             ToolParamSpec("text", "string", "Text to enter into the field", required = true),
-            ToolParamSpec("targetField", "string", "Optional label/hint/viewId of target field", required = false)
+            ToolParamSpec("targetField", "string", "Optional label/hint/viewId of target field", required = false),
+            ToolParamSpec("submit", "boolean", "Press Enter/Search after typing", required = false)
         )
         override val requiredPermissions = listOf(PermissionRequirement.ACCESSIBILITY)
         override val riskLevel = RiskLevel.MEDIUM
@@ -343,7 +344,8 @@ class ToolRegistry(
                     missingPermission = PermissionRequirement.ACCESSIBILITY
                 )
             }
-            val res = screenController.typeText(args["targetField"].orEmpty(), args["text"].orEmpty())
+            val submit = args["submit"]?.equals("true", ignoreCase = true) == true
+            val res = screenController.typeText(args["targetField"].orEmpty(), args["text"].orEmpty(), submit = submit)
             return ToolExecutionResult(id, res.success, res.message, res.affectedElement.orEmpty())
         }
     }

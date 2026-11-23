@@ -35,16 +35,20 @@ class ReasoningEngine(
         toolCatalogJson: String
     ): Pair<String, ReasoningDecision> {
         val settings = settingsRepository.settingsFlow.first()
+        val isCompound = IntentEngine.isCompoundAction(userInput)
 
-        // Fast deterministic local tool routing for immediate Android device controls
-        val localDecision = localFastPath(userInput, intent)
-        if (localDecision != null) {
-            return "Local Agent" to localDecision
+        // Skip single-step fast path for compound multi-step in-app goals so AI / Autonomous loop handles them cleanly
+        if (!isCompound) {
+            val localDecision = localFastPath(userInput, intent)
+            if (localDecision != null) {
+                return "Local Agent" to localDecision
+            }
         }
 
-        // Offline Mode routing
+        // Offline Mode routing (including deterministic offline compound helper!)
         if (isEffectiveOffline()) {
-            return offlineEngine.respond(userInput, intent, null)
+            val offlineCompound = if (isCompound) buildOfflineCompoundDecision(userInput) else null
+            return offlineEngine.respond(userInput, intent, offlineCompound)
         }
 
         val screenContext = if (screenController.isReady()) {
@@ -63,14 +67,18 @@ class ReasoningEngine(
         )
 
         return aiResult.getOrElse { err ->
-            // Fall back cleanly if network/AI drops mid-request
+            // If online planner fails, fall back cleanly to local compound or offline engine without double waiting
+            val localFallback = localFastPath(userInput, intent) ?: if (isCompound) buildOfflineCompoundDecision(userInput) else null
+            if (localFallback != null) {
+                return "Local Fallback Agent" to localFallback
+            }
             val offlineFallback = offlineEngine.respond(userInput, intent, null)
             val errDetail = err.localizedMessage ?: "connection error"
             val combinedReply = if (settings.operatingMode == AiOperatingMode.ONLINE) {
                 when (intent.detectedLanguage) {
-                    "bn" -> "অনলাইন AI-এর সাথে সংযোগ করতে সমস্যা হয়েছে ($errDetail)।"
+                    "bn" -> "অনলাইন AI-এর সাথে সংযোগ করতে সমস্যা হয়েছে ($errDetail)। নেটওয়ার্ক বা Cloudflare সেটিংস চেক করুন।"
                     "hi" -> "ऑनलाइन AI से जुड़ने में समस्या हुई ($errDetail)।"
-                    else -> "Online AI could not be reached ($errDetail). Check your connection or switch to Offline Mode."
+                    else -> "Online AI could not be reached ($errDetail). Check internet or Settings > Cloudflare/Gemini."
                 }
             } else {
                 offlineFallback.second.directReply
@@ -81,6 +89,114 @@ class ReasoningEngine(
                 plannedTools = emptyList()
             )
         }
+    }
+
+    suspend fun planFollowUpStep(
+        goal: String,
+        completedSteps: List<String>,
+        screenContext: String,
+        toolCatalogJson: String
+    ): Result<Pair<String, ReasoningDecision>> {
+        val settings = settingsRepository.settingsFlow.first()
+        if (isEffectiveOffline()) {
+            return Result.success("Offline • In-App Step" to buildOfflineFollowUp(goal, completedSteps, screenContext))
+        }
+        val router = aiEngine as? ModelRouter
+        return if (router != null) {
+            router.planNextInAppStep(
+                goal = goal,
+                completedSteps = completedSteps,
+                screenContext = screenContext,
+                toolCatalogJson = toolCatalogJson,
+                languageLabel = settings.language
+            )
+        } else {
+            aiEngine.reasonAndPlan(
+                userMessage = "Continue goal: $goal\nCompleted: ${completedSteps.joinToString("; ")}",
+                history = emptyList(),
+                memoryContext = "",
+                toolCatalogJson = toolCatalogJson,
+                screenContext = screenContext,
+                languageLabel = settings.language
+            )
+        }
+    }
+
+    private fun buildOfflineCompoundDecision(input: String): ReasoningDecision? {
+        val lower = input.lowercase()
+        // Handle "open youtube and search/play X" directly if clear
+        val ytMatch = Regex("(?:youtube|ইউটিউব).*(?:search|play|for|সার্চ|দেখাও)\\s+(.+)", RegexOption.IGNORE_CASE).find(input)
+        if (ytMatch != null) {
+            val q = ytMatch.groupValues[1].trim()
+            if (q.isNotBlank()) {
+                return ReasoningDecision(
+                    thoughtSummary = "Parsed compound YouTube query '$q'",
+                    directReply = "Opening YouTube and searching for $q.",
+                    plannedTools = listOf(PlannedToolCall("search_youtube", mapOf("query" to q), "Launch YouTube search")),
+                    nextActionNeeded = false
+                )
+            }
+        }
+        // Extract app name before "and" / "then" / "করে" / "তারপর"
+        val appClause = input
+            .split(Regex("\\s+(?:and|then|after that|এবং|তারপর|করে|और|फिर)\\s+", RegexOption.IGNORE_CASE), limit = 2)
+            .firstOrNull()
+            .orEmpty()
+        val appName = stripPrefixes(
+            appClause,
+            listOf("open the app ", "launch the app ", "open ", "launch ", "start ", "অ্যাপ খোলো ", "খুলে দাও ", "খোলো ", "চালু কর ", "ऐप खोलो ", "खोलो ")
+        )
+        if (appName.isBlank()) return null
+        return ReasoningDecision(
+            thoughtSummary = "Step 1 of compound goal: launch '$appName' then inspect live screen UI for next steps",
+            directReply = "Opening $appName and preparing next action.",
+            plannedTools = listOf(PlannedToolCall("open_app", mapOf("appName" to appName), "Open target app before in-app control")),
+            nextActionNeeded = lower.contains("search") || lower.contains("type") || lower.contains("click") || lower.contains("tap") || lower.contains("scroll")
+        )
+    }
+
+    private fun buildOfflineFollowUp(
+        goal: String,
+        completedSteps: List<String>,
+        screenContext: String
+    ): ReasoningDecision {
+        val lower = goal.lowercase()
+        val typedAlready = completedSteps.any { it.startsWith("type_text") }
+        val clickedSearchAlready = completedSteps.any { it.contains("Search", ignoreCase = true) }
+
+        val searchTerm = Regex("(?:search(?: for)?|type|write|find|সার্চ|টাইপ)\\s+(.+)$", RegexOption.IGNORE_CASE)
+            .find(goal)?.groupValues?.getOrNull(1)?.trim().orEmpty()
+
+        if (searchTerm.isNotBlank() && !typedAlready) {
+            if (screenContext.contains("(editable)", ignoreCase = true) ||
+                screenContext.contains("editable", ignoreCase = true)
+            ) {
+                return ReasoningDecision(
+                    thoughtSummary = "Found editable text box on active screen; typing '$searchTerm' with submit",
+                    directReply = "Typed '$searchTerm' inside the app.",
+                    plannedTools = listOf(
+                        PlannedToolCall("type_text", mapOf("text" to searchTerm, "submit" to "true"), "Enter query and submit")
+                    ),
+                    nextActionNeeded = false
+                )
+            }
+            if (!clickedSearchAlready && screenContext.contains("search", ignoreCase = true)) {
+                return ReasoningDecision(
+                    thoughtSummary = "Tapping Search control first to reveal input field",
+                    directReply = "Opening search box.",
+                    plannedTools = listOf(
+                        PlannedToolCall("click_ui_element", mapOf("targetText" to "Search"), "Reveal search input")
+                    ),
+                    nextActionNeeded = true
+                )
+            }
+        }
+        return ReasoningDecision(
+            thoughtSummary = "Completed offline in-app steps ($screenContext)",
+            directReply = "Done. Completed the requested in-app action.",
+            plannedTools = emptyList(),
+            nextActionNeeded = false
+        )
     }
 
     fun buildLocalFastPath(input: String, intent: IntentAnalysis): ReasoningDecision? = localFastPath(input, intent)
@@ -136,6 +252,11 @@ class ReasoningEngine(
                             listOf(PlannedToolCall("control_media_volume", mapOf("mediaAction" to cmd), "Control playback"))
                         )
                     }
+                    lower.contains("quick settings") || lower.contains("কুইক সেটিংস") -> ReasoningDecision(
+                        "Open Quick Settings shade",
+                        "Opening Quick Settings.",
+                        listOf(PlannedToolCall("navigate_system", mapOf("action" to "quick_settings"), "Expand quick settings"))
+                    )
                     lower.contains("wifi") || lower.contains("wi-fi") || lower.contains("ওয়াইফাই") -> ReasoningDecision(
                         "Open Wi-Fi settings",
                         "Opening Wi-Fi and internet settings.",
@@ -168,8 +289,8 @@ class ReasoningEngine(
                     )
                     lower.contains("lock") || lower.contains("লক") -> ReasoningDecision(
                         "Device lock requested",
-                        "Checking Device Administrator permission to lock screen.",
-                        listOf(PlannedToolCall("get_device_information", mapOf("action" to "lock_screen"), "Lock screen if Device Admin active"))
+                        "Checking Device Administrator / Accessibility to lock screen.",
+                        listOf(PlannedToolCall("get_device_information", mapOf("action" to "lock_screen"), "Lock screen if permitted"))
                     )
                     else -> ReasoningDecision(
                         "Device diagnostics requested",

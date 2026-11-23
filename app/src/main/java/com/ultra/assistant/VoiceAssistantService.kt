@@ -20,6 +20,7 @@ import android.speech.tts.UtteranceProgressListener
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import com.ultra.assistant.brain.AgentManager
+import com.ultra.assistant.brain.IntentEngine
 import com.ultra.assistant.data.AiOperatingMode
 import com.ultra.assistant.data.LocalSettingsRepository
 import com.ultra.assistant.data.NetworkMonitor
@@ -29,6 +30,7 @@ import com.ultra.assistant.voice.VoiceAudioController
 import com.ultra.assistant.voice.WakeWordEngine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
@@ -40,6 +42,7 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
         const val ACTION_START_SINGLE_TURN = "com.ultra.assistant.START_SINGLE_TURN"
         const val ACTION_STOP = "com.ultra.assistant.STOP_VOICE"
         const val ACTION_INTERRUPT = "com.ultra.assistant.INTERRUPT_VOICE"
+        const val ACTION_CANCEL_AGENT = "com.ultra.assistant.CANCEL_AGENT"
         const val ACTION_STOP_SPEAKING = "com.ultra.assistant.STOP_SPEAKING"
         const val ACTION_SPEAK_TEXT = "com.ultra.assistant.SPEAK_TEXT"
         const val ACTION_TEST_VOICE = "com.ultra.assistant.TEST_VOICE"
@@ -77,6 +80,7 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
     private var activeFinalUtteranceId: String? = null
     private var consecutiveIdleErrors = 0
     private var floatingDot: FloatingDot? = null
+    private var activeAgentJob: Job? = null
 
     private val handler = Handler(Looper.getMainLooper())
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -150,6 +154,15 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
 
         if (action == ACTION_STOP_SPEAKING) {
             stopSpeakingOnly()
+            return START_STICKY
+        }
+
+        if (action == ACTION_CANCEL_AGENT) {
+            agentManager.requestStop()
+            activeAgentJob?.cancel()
+            activeAgentJob = null
+            aiRequestInProgress = false
+            sendVoiceState("IDLE")
             return START_STICKY
         }
 
@@ -261,6 +274,9 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
     }
 
     private fun interruptSpeakingAndListen() {
+        agentManager.requestStop()
+        activeAgentJob?.cancel()
+        activeAgentJob = null
         runCatching { tts?.stop() }
         audioController.abandonSpeechFocus()
         speaking = false
@@ -394,8 +410,11 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, language)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, language)
+            if (settingsRepository.languageAutoDetect()) {
+                putExtra(RecognizerIntent.EXTRA_ONLY_RETURN_LANGUAGE_PREFERENCE, false)
+            }
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1750L)
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1150L)
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 1200L)
@@ -415,7 +434,8 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
         }
     }
 
-    private fun processSpokenTranscript(spoken: String) {
+    private fun processSpokenTranscript(spokenRaw: String) {
+        val spoken = IntentEngine.normalizeSpeechTranscript(spokenRaw)
         val wakePhrase = settingsRepository.wakePhrase()
         val hasWake = WakeWordEngine.detected(spoken, wakePhrase)
         val commandText = if (hasWake) {
@@ -440,7 +460,8 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
 
         aiRequestInProgress = true
         sendVoiceState("PROCESSING", commandText)
-        serviceScope.launch {
+        activeAgentJob?.cancel()
+        activeAgentJob = serviceScope.launch {
             val report = runCatching {
                 agentManager.handleUserCommand(commandText)
             }.getOrNull()

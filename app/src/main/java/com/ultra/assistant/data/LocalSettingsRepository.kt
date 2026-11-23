@@ -15,7 +15,7 @@ import kotlinx.coroutines.flow.map
 private val Context.ultraDataStore: DataStore<Preferences> by preferencesDataStore(name = "ultra_preferences")
 
 enum class AiProviderMode(val label: String) {
-    AUTO("Auto (Firebase AI + Worker Fallback)"),
+    AUTO("Auto (Firebase AI + Cloudflare Fallback)"),
     FIREBASE_AI("Firebase AI Logic (Gemini)"),
     CLOUDFLARE_WORKER("Cloudflare Worker Gateway")
 }
@@ -24,6 +24,12 @@ enum class AiOperatingMode(val label: String) {
     AUTO("Auto (Online + Offline Fallback)"),
     ONLINE("Online AI Mode"),
     OFFLINE("Offline Local Mode")
+}
+
+enum class AiSpeedProfile(val label: String, val modelId: String) {
+    TURBO("Turbo Speed (Instant)", "gemini-3.5-flash-lite"),
+    BALANCED("Balanced (ChatGPT + Jarvis)", "gemini-3.8-flash"),
+    DEEP_THINK("Deep Reasoning", "gemini-4-argon")
 }
 
 enum class VoiceGender(val label: String) {
@@ -46,15 +52,19 @@ enum class UltraThemeStyle(val label: String) {
 
 data class UltraSettings(
     val language: String = "English",
+    val languageAutoDetect: Boolean = true,
     val wakePhrase: String = "Hey Ultra",
     val voiceGender: VoiceGender = VoiceGender.FEMALE,
     val voiceSpeed: Float = 1.0f,
     val voicePitch: Float = 1.0f,
     val voiceVolume: Float = 0.95f,
+    val autoSpeakChatReplies: Boolean = false,
     val operatingMode: AiOperatingMode = AiOperatingMode.AUTO,
     val aiProviderMode: AiProviderMode = AiProviderMode.AUTO,
+    val aiSpeedProfile: AiSpeedProfile = AiSpeedProfile.BALANCED,
     val geminiModel: String = "gemini-3.8-flash",
     val workerEndpoint: String = DEFAULT_WORKER_ENDPOINT,
+    val workerAuthToken: String = "",
     val backgroundStyle: ChatBackgroundStyle = ChatBackgroundStyle.NEURAL_COSMOS,
     val uiThemeStyle: UltraThemeStyle = UltraThemeStyle.CYBER_CYAN,
     val floatingAssistantEnabled: Boolean = false,
@@ -84,6 +94,8 @@ class LocalSettingsRepository(context: Context) {
     fun setLanguage(v: String) {
         prefs.edit().putString("language", v).apply()
     }
+
+    fun languageAutoDetect(): Boolean = prefs.getBoolean("language_auto_detect", true)
 
     fun wakePhrase(): String = prefs.getString("wake_phrase", "Hey Ultra") ?: "Hey Ultra"
 
@@ -130,15 +142,19 @@ class LocalSettingsRepository(context: Context) {
             val current = parseSettings(data)
             val next = transform(current)
             data[KEY_LANGUAGE] = next.language
+            data[KEY_LANGUAGE_AUTO_DETECT] = next.languageAutoDetect
             data[KEY_WAKE_PHRASE] = next.wakePhrase.trim().ifBlank { "Hey Ultra" }
             data[KEY_VOICE_GENDER] = next.voiceGender.name
             data[KEY_VOICE_SPEED] = next.voiceSpeed.coerceIn(0.75f, 1.35f)
             data[KEY_VOICE_PITCH] = next.voicePitch.coerceIn(0.75f, 1.35f)
             data[KEY_VOICE_VOLUME] = next.voiceVolume.coerceIn(0.1f, 1.0f)
+            data[KEY_AUTO_SPEAK_CHAT] = next.autoSpeakChatReplies
             data[KEY_OPERATING_MODE] = next.operatingMode.name
             data[KEY_AI_PROVIDER] = next.aiProviderMode.name
+            data[KEY_AI_SPEED_PROFILE] = next.aiSpeedProfile.name
             data[KEY_GEMINI_MODEL] = next.geminiModel
             data[KEY_WORKER_ENDPOINT] = next.workerEndpoint.trim().ifBlank { UltraSettings.DEFAULT_WORKER_ENDPOINT }
+            data[KEY_WORKER_TOKEN] = next.workerAuthToken.trim()
             data[KEY_BG_STYLE] = next.backgroundStyle.name
             data[KEY_THEME_STYLE] = next.uiThemeStyle.name
             data[KEY_FLOATING_ASSISTANT] = next.floatingAssistantEnabled
@@ -155,6 +171,7 @@ class LocalSettingsRepository(context: Context) {
 
             prefs.edit()
                 .putString("language", next.language)
+                .putBoolean("language_auto_detect", next.languageAutoDetect)
                 .putString("wake_phrase", next.wakePhrase.trim().ifBlank { "Hey Ultra" })
                 .putString("voice_gender", next.voiceGender.name)
                 .putFloat("voice_speed", next.voiceSpeed.coerceIn(0.75f, 1.35f))
@@ -171,6 +188,8 @@ class LocalSettingsRepository(context: Context) {
     private fun parseSettings(data: Preferences): UltraSettings {
         val provider = enumValues<AiProviderMode>().firstOrNull { it.name == data[KEY_AI_PROVIDER] }
             ?: AiProviderMode.AUTO
+        val speedProfile = enumValues<AiSpeedProfile>().firstOrNull { it.name == data[KEY_AI_SPEED_PROFILE] }
+            ?: AiSpeedProfile.BALANCED
         val opMode = enumValues<AiOperatingMode>().firstOrNull { it.name == data[KEY_OPERATING_MODE] }
             ?: operatingMode()
         val gender = enumValues<VoiceGender>().firstOrNull { it.name == data[KEY_VOICE_GENDER] }
@@ -181,15 +200,19 @@ class LocalSettingsRepository(context: Context) {
             ?: UltraThemeStyle.CYBER_CYAN
         return UltraSettings(
             language = data[KEY_LANGUAGE] ?: language(),
+            languageAutoDetect = data[KEY_LANGUAGE_AUTO_DETECT] ?: languageAutoDetect(),
             wakePhrase = data[KEY_WAKE_PHRASE] ?: wakePhrase(),
             voiceGender = gender,
             voiceSpeed = (data[KEY_VOICE_SPEED] ?: voiceSpeed()).coerceIn(0.75f, 1.35f),
             voicePitch = (data[KEY_VOICE_PITCH] ?: voicePitch()).coerceIn(0.75f, 1.35f),
             voiceVolume = (data[KEY_VOICE_VOLUME] ?: voiceVolume()).coerceIn(0.1f, 1.0f),
+            autoSpeakChatReplies = data[KEY_AUTO_SPEAK_CHAT] ?: false,
             operatingMode = opMode,
             aiProviderMode = provider,
-            geminiModel = data[KEY_GEMINI_MODEL] ?: "gemini-3.8-flash",
+            aiSpeedProfile = speedProfile,
+            geminiModel = data[KEY_GEMINI_MODEL] ?: speedProfile.modelId,
             workerEndpoint = data[KEY_WORKER_ENDPOINT] ?: UltraSettings.DEFAULT_WORKER_ENDPOINT,
+            workerAuthToken = data[KEY_WORKER_TOKEN] ?: "",
             backgroundStyle = bg,
             uiThemeStyle = theme,
             floatingAssistantEnabled = data[KEY_FLOATING_ASSISTANT] ?: floatingAssistantEnabled(),
@@ -208,15 +231,19 @@ class LocalSettingsRepository(context: Context) {
 
     private companion object {
         val KEY_LANGUAGE = stringPreferencesKey("language")
+        val KEY_LANGUAGE_AUTO_DETECT = booleanPreferencesKey("language_auto_detect")
         val KEY_WAKE_PHRASE = stringPreferencesKey("wake_phrase")
         val KEY_VOICE_GENDER = stringPreferencesKey("voice_gender")
         val KEY_VOICE_SPEED = floatPreferencesKey("voice_speed")
         val KEY_VOICE_PITCH = floatPreferencesKey("voice_pitch")
         val KEY_VOICE_VOLUME = floatPreferencesKey("voice_volume")
+        val KEY_AUTO_SPEAK_CHAT = booleanPreferencesKey("auto_speak_chat_replies")
         val KEY_OPERATING_MODE = stringPreferencesKey("operating_mode")
         val KEY_AI_PROVIDER = stringPreferencesKey("ai_provider_mode")
+        val KEY_AI_SPEED_PROFILE = stringPreferencesKey("ai_speed_profile")
         val KEY_GEMINI_MODEL = stringPreferencesKey("gemini_model")
         val KEY_WORKER_ENDPOINT = stringPreferencesKey("worker_endpoint")
+        val KEY_WORKER_TOKEN = stringPreferencesKey("worker_auth_token")
         val KEY_BG_STYLE = stringPreferencesKey("background_style")
         val KEY_THEME_STYLE = stringPreferencesKey("ui_theme_style")
         val KEY_FLOATING_ASSISTANT = booleanPreferencesKey("floating_assistant")

@@ -14,12 +14,22 @@ data class MemoryRecordEntity(
     val syncedToCloud: Boolean = false
 )
 
+@Entity(tableName = "conversation_sessions")
+data class ConversationSessionEntity(
+    @PrimaryKey val id: String,
+    val title: String,
+    val createdAtMillis: Long = System.currentTimeMillis(),
+    val updatedAtMillis: Long = System.currentTimeMillis()
+)
+
 @Entity(tableName = "conversation_messages")
 data class ConversationMessageEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0L,
+    val sessionId: String = "default",
     val role: String, // "user", "assistant", "tool"
     val content: String,
     val languageTag: String = "en-US",
+    val providerLabel: String = "",
     val timestampMillis: Long = System.currentTimeMillis()
 )
 

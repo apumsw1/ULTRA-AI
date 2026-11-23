@@ -14,11 +14,13 @@ sealed interface UiState<out T> {
 enum class IntentCategory {
     APP_OPEN,
     WEB_SEARCH,
+    YOUTUBE_SEARCH,
     MUSIC_SEARCH,
     SCREEN_INSPECT,
     SCREEN_ACTION,
     NOTIFICATION_READ,
     SMS_PREPARE,
+    PHONE_CALL,
     REMINDER,
     DEVICE_CONTROL,
     MEMORY_SAVE,

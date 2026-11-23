@@ -22,20 +22,23 @@ class ResultVerifier {
         val confirmationNeeded = results.any { it.requiresConfirmation }
 
         val combinedDetails = results.joinToString("\n") { res ->
-            val badge = if (res.success) "✓" else "!"
             val extra = if (res.outputData.isNotBlank() && res.toolId in setOf("get_notifications", "get_accessible_screen", "get_device_information")) {
                 "\n${res.outputData}"
             } else {
                 ""
             }
-            "$badge ${res.summary}$extra"
+            "${res.summary}$extra"
         }
 
         val reply = when {
             confirmationNeeded -> results.first { it.requiresConfirmation }.summary
-            missingPerm != null -> "${results.first { it.missingPermission != null }.summary} Open Settings > Permissions to enable ${missingPerm.displayName}."
+            missingPerm != null -> "${results.first { it.missingPermission != null }.summary} Open Settings to grant ${missingPerm.displayName}."
             allOk && decisionReply.isNotBlank() && results.none { it.toolId in setOf("get_notifications", "get_accessible_screen", "get_device_information") } ->
-                "$decisionReply\n$combinedDetails"
+                if (results.size == 1 && results.first().summary.equals(decisionReply, ignoreCase = true)) {
+                    decisionReply
+                } else {
+                    "$decisionReply\n$combinedDetails"
+                }
             else -> combinedDetails
         }
 

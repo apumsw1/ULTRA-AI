@@ -1,43 +1,64 @@
 package com.ultra.assistant.ui.voice
 
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.material.icons.filled.BubbleChart
+import androidx.compose.material.icons.filled.CallEnd
 import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.PanTool
+import androidx.compose.material.icons.filled.RecordVoiceOver
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.ultra.assistant.R
+import com.ultra.assistant.data.AiOperatingMode
 import com.ultra.assistant.data.UltraSettings
+import com.ultra.assistant.data.VoiceGender
 import com.ultra.assistant.ui.components.HudCard
 import com.ultra.assistant.ui.components.StatusPill
 import com.ultra.assistant.ui.components.VoiceOrbCanvas
 import com.ultra.assistant.ui.theme.AmberWarning
 import com.ultra.assistant.ui.theme.ArcCyan
+import com.ultra.assistant.ui.theme.CrimsonAlert
 import com.ultra.assistant.ui.theme.EmeraldVerified
 
 @Composable
@@ -48,62 +69,132 @@ fun VoiceScreen(
     partialTranscript: String,
     lastRecognizedText: String,
     lastAgentReply: String,
+    streamingReply: String,
+    isOnline: Boolean,
     settings: UltraSettings,
     onStartVoice: () -> Unit,
     onStopVoice: () -> Unit,
     onInterruptVoice: () -> Unit,
+    onStopSpeaking: () -> Unit,
+    onEnableFloatingDot: () -> Unit,
+    onTestVoice: () -> Unit,
+    onSelectVoiceGender: (VoiceGender) -> Unit,
     onSelectLanguage: (String) -> Unit,
     onUpdateWakePhrase: (String) -> Unit,
-    onUpdateVoiceTuning: (Float, Float) -> Unit
+    onUpdateVoiceTuning: (Float, Float) -> Unit,
+    onUpdateVoiceVolume: (Float) -> Unit,
+    onToggleContinuousListening: (Boolean) -> Unit
 ) {
     var wakePhraseInput by remember(settings.wakePhrase) { mutableStateOf(settings.wakePhrase) }
-    var speed by remember(settings.voiceSpeed) { mutableStateOf(settings.voiceSpeed) }
-    var pitch by remember(settings.voicePitch) { mutableStateOf(settings.voicePitch) }
+    var speed by remember(settings.voiceSpeed) { mutableFloatStateOf(settings.voiceSpeed) }
+    var pitch by remember(settings.voicePitch) { mutableFloatStateOf(settings.voicePitch) }
+    var volume by remember(settings.voiceVolume) { mutableFloatStateOf(settings.voiceVolume) }
+
+    val effectiveOffline = settings.operatingMode == AiOperatingMode.OFFLINE || !isOnline
+    val speaking = voiceState.equals("SPEAKING", true)
 
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
-            .widthIn(max = 640.dp),
+            .widthIn(max = 680.dp),
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         item {
             HudCard {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Image(
+                            painter = painterResource(id = R.drawable.img_ultra_avatar),
+                            contentDescription = "ULTRA AI Voice Call",
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(CircleShape)
+                        )
+                        StatusPill(
+                            label = if (isServiceRunning) "LIVE CALL: $voiceState" else "VOICE READY",
+                            color = if (isServiceRunning) EmeraldVerified else ArcCyan
+                        )
+                    }
+                    StatusPill(
+                        label = if (effectiveOffline) "OFFLINE VOICE" else "ONLINE VOICE",
+                        color = if (effectiveOffline) AmberWarning else EmeraldVerified
+                    )
+                }
+
                 Column(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    StatusPill(
-                        label = if (isServiceRunning) "VOICE ENGINE: $voiceState" else "VOICE ENGINE: OFFLINE",
-                        color = if (isServiceRunning) EmeraldVerified else AmberWarning
-                    )
                     VoiceOrbCanvas(
                         voiceState = voiceState,
                         voiceLevel = voiceLevel,
-                        isServiceActive = isServiceRunning,
-                        modifier = Modifier.size(185.dp)
+                        isServiceActive = isServiceRunning || speaking,
+                        modifier = Modifier
+                            .size(205.dp)
+                            .clickable {
+                                if (speaking) onInterruptVoice()
+                                else if (isServiceRunning) onStopVoice()
+                                else onStartVoice()
+                            }
                     )
-                    if (partialTranscript.isNotBlank()) {
-                        Text(
-                            text = "\"$partialTranscript\"",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = ArcCyan
-                        )
-                    } else if (lastRecognizedText.isNotBlank()) {
-                        Text(
-                            text = "Heard: \"$lastRecognizedText\"",
-                            style = MaterialTheme.typography.bodyMedium
-                        )
+
+                    Text(
+                        text = when {
+                            speaking -> "Speaking (${settings.voiceGender.label}) — tap orb to interrupt"
+                            voiceState == "LISTENING" -> "Listening naturally — speak anytime"
+                            voiceState == "PROCESSING" -> "Thinking about your request..."
+                            isServiceRunning -> "Connected • Natural turn-taking active"
+                            else -> "Start a live phone-style AI conversation"
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    if (partialTranscript.isNotBlank() || lastRecognizedText.isNotBlank()) {
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = MaterialTheme.shapes.medium,
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f),
+                            border = BorderStroke(1.dp, ArcCyan.copy(alpha = 0.4f))
+                        ) {
+                            Text(
+                                text = if (partialTranscript.isNotBlank()) "\"$partialTranscript\"" else "You: \"$lastRecognizedText\"",
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = ArcCyan,
+                                modifier = Modifier.padding(12.dp)
+                            )
+                        }
                     }
-                    if (lastAgentReply.isNotBlank()) {
-                        Text(
-                            text = lastAgentReply,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = EmeraldVerified
-                        )
+
+                    val displayReply = streamingReply.ifBlank { lastAgentReply }
+                    if (displayReply.isNotBlank()) {
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = MaterialTheme.shapes.medium,
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.8f),
+                            border = BorderStroke(1.dp, EmeraldVerified.copy(alpha = 0.4f))
+                        ) {
+                            Text(
+                                text = displayReply,
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.padding(12.dp)
+                            )
+                        }
                     }
                 }
+
+                Spacer(Modifier.height(4.dp))
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -111,26 +202,52 @@ fun VoiceScreen(
                 ) {
                     Button(
                         onClick = if (isServiceRunning) onStopVoice else onStartVoice,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (isServiceRunning) CrimsonAlert else MaterialTheme.colorScheme.primary
+                        ),
                         modifier = Modifier
                             .weight(1f)
-                            .height(48.dp)
+                            .height(50.dp)
                             .testTag("voice_start_stop_button")
                     ) {
                         Icon(
-                            imageVector = if (isServiceRunning) Icons.Default.MicOff else Icons.Default.Mic,
-                            contentDescription = "Toggle voice service"
+                            imageVector = if (isServiceRunning) Icons.Default.CallEnd else Icons.Default.Mic,
+                            contentDescription = "Toggle voice conversation"
                         )
-                        Text(if (isServiceRunning) " Stop Service" else " Start Voice")
+                        Text(
+                            if (isServiceRunning) " End Voice Call" else " Start Voice Call",
+                            fontWeight = FontWeight.SemiBold
+                        )
                     }
-                    OutlinedButton(
-                        onClick = onInterruptVoice,
-                        enabled = isServiceRunning,
-                        modifier = Modifier
-                            .height(48.dp)
-                            .testTag("voice_interrupt_button")
-                    ) {
-                        Icon(Icons.Default.PanTool, contentDescription = "Interrupt speech")
-                        Text(" Interrupt")
+
+                    if (speaking) {
+                        OutlinedButton(
+                            onClick = onInterruptVoice,
+                            modifier = Modifier
+                                .height(50.dp)
+                                .testTag("voice_interrupt_button")
+                        ) {
+                            Icon(Icons.Default.PanTool, contentDescription = "Interrupt speaking")
+                            Text(" Interrupt")
+                        }
+                        OutlinedButton(
+                            onClick = onStopSpeaking,
+                            modifier = Modifier
+                                .height(50.dp)
+                                .testTag("voice_stop_speaking_button")
+                        ) {
+                            Icon(Icons.Default.Stop, contentDescription = "Stop speaking")
+                        }
+                    } else {
+                        OutlinedButton(
+                            onClick = onEnableFloatingDot,
+                            modifier = Modifier
+                                .height(50.dp)
+                                .testTag("voice_floating_bubble_button")
+                        ) {
+                            Icon(Icons.Default.BubbleChart, contentDescription = "Floating bubble")
+                            Text(" Bubble")
+                        }
                     }
                 }
             }
@@ -138,15 +255,60 @@ fun VoiceScreen(
 
         item {
             HudCard {
-                Text("Multilingual Speech & TTS", style = MaterialTheme.typography.titleMedium)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Human Voice & Language", style = MaterialTheme.typography.titleMedium)
+                    OutlinedButton(
+                        onClick = onTestVoice,
+                        modifier = Modifier
+                            .height(44.dp)
+                            .testTag("test_voice_button")
+                    ) {
+                        Icon(Icons.Default.RecordVoiceOver, contentDescription = "Preview voice")
+                        Text(" Preview")
+                    }
+                }
+
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf("বাংলা", "English", "हिन्दी").forEach { lang ->
+                    VoiceGender.entries.forEach { gender ->
+                        FilterChip(
+                            selected = settings.voiceGender == gender,
+                            onClick = { onSelectVoiceGender(gender) },
+                            label = { Text(gender.label) }
+                        )
+                    }
+                }
+
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("English", "বাংলা", "हिन्दी").forEach { lang ->
                         FilterChip(
                             selected = settings.language == lang,
                             onClick = { onSelectLanguage(lang) },
                             label = { Text(lang) }
                         )
                     }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Continuous Conversation", style = MaterialTheme.typography.bodyLarge)
+                        Text(
+                            "Automatically listen after AI finishes speaking with natural turn-taking.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = settings.continuousListening,
+                        onCheckedChange = onToggleContinuousListening
+                    )
                 }
 
                 Row(
@@ -173,7 +335,7 @@ fun VoiceScreen(
                     }
                 }
 
-                Text("Speech Rate: ${"%.2f".format(speed)}x", style = MaterialTheme.typography.bodyMedium)
+                Text("Speaking Speed: ${"%.2f".format(speed)}x", style = MaterialTheme.typography.bodyMedium)
                 Slider(
                     value = speed,
                     onValueChange = { speed = it },
@@ -181,26 +343,23 @@ fun VoiceScreen(
                     onValueChangeFinished = { onUpdateVoiceTuning(speed, pitch) }
                 )
 
-                Text("Voice Pitch: ${"%.2f".format(pitch)}x", style = MaterialTheme.typography.bodyMedium)
+                Text("Voice Pitch Fine-Tune: ${"%.2f".format(pitch)}x", style = MaterialTheme.typography.bodyMedium)
                 Slider(
                     value = pitch,
                     onValueChange = { pitch = it },
                     valueRange = 0.75f..1.35f,
                     onValueChangeFinished = { onUpdateVoiceTuning(speed, pitch) }
                 )
-            }
-        }
 
-        item {
-            HudCard(borderColor = AmberWarning) {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Icon(Icons.Default.GraphicEq, contentDescription = "Voice notice", tint = AmberWarning)
-                    Text("Battery & Android Speech Notice", style = MaterialTheme.typography.titleMedium)
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Icon(Icons.AutoMirrored.Filled.VolumeUp, contentDescription = "Voice volume", tint = ArcCyan)
+                    Text("Voice Volume: ${(volume * 100).toInt()}%", style = MaterialTheme.typography.bodyMedium)
                 }
-                Text(
-                    "Wake phrase detection uses Android SpeechRecognizer transcript matching inside a visible foreground microphone service. Always-on 24/7 listening cannot be guaranteed across OEM battery policies.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                Slider(
+                    value = volume,
+                    onValueChange = { volume = it },
+                    valueRange = 0.1f..1.0f,
+                    onValueChangeFinished = { onUpdateVoiceVolume(volume) }
                 )
             }
         }

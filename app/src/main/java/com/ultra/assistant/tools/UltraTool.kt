@@ -13,7 +13,9 @@ enum class PermissionRequirement(val displayName: String) {
     MICROPHONE("Microphone"),
     OVERLAY("Display Over Other Apps"),
     DEVICE_ADMIN("Device Administrator"),
-    DEFAULT_SMS_APP("Default SMS Handler (or Messaging App)")
+    DEFAULT_SMS_APP("Default SMS Handler (or Messaging App)"),
+    READ_CONTACTS("Contacts"),
+    CALL_PHONE("Phone Call")
 }
 
 data class ToolParamSpec(

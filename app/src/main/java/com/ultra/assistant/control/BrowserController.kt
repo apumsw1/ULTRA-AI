@@ -26,6 +26,41 @@ class BrowserController(context: Context) {
         return openUrl(url)
     }
 
+    fun searchYouTube(query: String): Result<String> {
+        val clean = query.trim()
+        if (clean.isBlank()) return Result.failure(IllegalArgumentException("YouTube search query cannot be empty."))
+        val encoded = URLEncoder.encode(clean, "UTF-8")
+        val webUrl = "https://www.youtube.com/results?search_query=$encoded"
+        val ytPackage = "com.google.android.youtube"
+        val appIntent = Intent(Intent.ACTION_SEARCH).apply {
+            setPackage(ytPackage)
+            putExtra("query", clean)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        val appSearchRes = runCatching {
+            if (appIntent.resolveActivity(appContext.packageManager) != null) {
+                appContext.startActivity(appIntent)
+                webUrl
+            } else {
+                null
+            }
+        }.getOrNull()
+        if (appSearchRes != null) return Result.success(appSearchRes)
+
+        val ytViewIntent = Intent(Intent.ACTION_VIEW, Uri.parse(webUrl)).apply {
+            setPackage(ytPackage)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        return runCatching {
+            if (ytViewIntent.resolveActivity(appContext.packageManager) != null) {
+                appContext.startActivity(ytViewIntent)
+                webUrl
+            } else {
+                openUrl(webUrl).getOrThrow()
+            }
+        }
+    }
+
     fun searchYouTubeMusic(query: String): Result<String> {
         val clean = query.trim()
         if (clean.isBlank()) return Result.failure(IllegalArgumentException("Music query cannot be empty."))

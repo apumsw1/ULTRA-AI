@@ -29,14 +29,35 @@ interface MemoryDao {
 
 @Dao
 interface ConversationDao {
+    @Query("SELECT * FROM conversation_sessions ORDER BY updatedAtMillis DESC")
+    fun observeSessions(): Flow<List<ConversationSessionEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertSession(session: ConversationSessionEntity)
+
+    @Query("DELETE FROM conversation_sessions WHERE id = :sessionId")
+    suspend fun deleteSession(sessionId: String)
+
+    @Query("DELETE FROM conversation_sessions")
+    suspend fun clearAllSessions()
+
+    @Query("SELECT * FROM conversation_messages WHERE sessionId = :sessionId ORDER BY timestampMillis ASC LIMIT :limit")
+    fun observeBySession(sessionId: String, limit: Int = 120): Flow<List<ConversationMessageEntity>>
+
     @Query("SELECT * FROM conversation_messages ORDER BY timestampMillis ASC LIMIT :limit")
-    fun observeRecent(limit: Int = 60): Flow<List<ConversationMessageEntity>>
+    fun observeRecent(limit: Int = 120): Flow<List<ConversationMessageEntity>>
+
+    @Query("SELECT * FROM conversation_messages WHERE sessionId = :sessionId ORDER BY timestampMillis DESC LIMIT :limit")
+    suspend fun getLatestForSession(sessionId: String, limit: Int = 16): List<ConversationMessageEntity>
 
     @Query("SELECT * FROM conversation_messages ORDER BY timestampMillis DESC LIMIT :limit")
-    suspend fun getLatest(limit: Int = 12): List<ConversationMessageEntity>
+    suspend fun getLatest(limit: Int = 16): List<ConversationMessageEntity>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(message: ConversationMessageEntity)
+
+    @Query("DELETE FROM conversation_messages WHERE sessionId = :sessionId")
+    suspend fun clearSessionMessages(sessionId: String)
 
     @Query("DELETE FROM conversation_messages")
     suspend fun clearAll()

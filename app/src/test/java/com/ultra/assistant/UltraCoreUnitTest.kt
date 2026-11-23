@@ -21,10 +21,22 @@ class UltraCoreUnitTest {
     private val verifier = ResultVerifier()
 
     @Test
-    fun `intent engine classifies multilingual commands`() {
+    fun `intent engine classifies multilingual and device control commands`() {
         val openEn = intentEngine.classify("Open YouTube")
         assertEquals(IntentCategory.APP_OPEN, openEn.category)
         assertEquals("en", openEn.detectedLanguage)
+
+        val ytSearch = intentEngine.classify("Search YouTube for Jetpack Compose")
+        assertEquals(IntentCategory.YOUTUBE_SEARCH, ytSearch.category)
+
+        val volCtrl = intentEngine.classify("Turn volume up")
+        assertEquals(IntentCategory.DEVICE_CONTROL, volCtrl.category)
+
+        val wifiSettings = intentEngine.classify("Open Wi-Fi settings")
+        assertEquals(IntentCategory.DEVICE_CONTROL, wifiSettings.category)
+
+        val callAction = intentEngine.classify("Call Mom")
+        assertEquals(IntentCategory.PHONE_CALL, callAction.category)
 
         val lockBn = intentEngine.classify("ফোন লক করো")
         assertEquals(IntentCategory.DEVICE_CONTROL, lockBn.category)

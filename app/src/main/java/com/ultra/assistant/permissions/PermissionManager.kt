@@ -12,6 +12,7 @@ import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
 import android.provider.Telephony
+import android.speech.SpeechRecognizer
 import android.view.accessibility.AccessibilityManager
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
@@ -26,7 +27,10 @@ data class PermissionAuditSnapshot(
     val notificationListenerEnabled: Boolean,
     val deviceAdminActive: Boolean,
     val batteryOptimizationIgnored: Boolean,
-    val isDefaultSmsHandler: Boolean
+    val isDefaultSmsHandler: Boolean,
+    val contactsGranted: Boolean = false,
+    val callPhoneGranted: Boolean = false,
+    val speechRecognitionAvailable: Boolean = true
 )
 
 object PermissionManager {
@@ -40,11 +44,27 @@ object PermissionManager {
         }
     }
 
+    fun missingContactsAndPhone(context: Context): List<String> {
+        return listOf(Manifest.permission.READ_CONTACTS, Manifest.permission.CALL_PHONE).filter {
+            ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED
+        }
+    }
+
     fun hasMicrophone(context: Context): Boolean =
         ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
 
     fun hasNotifications(context: Context): Boolean = Build.VERSION.SDK_INT < 33 ||
         ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+
+    fun hasContacts(context: Context): Boolean =
+        ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED
+
+    fun hasCallPhone(context: Context): Boolean =
+        ContextCompat.checkSelfPermission(context, Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED
+
+    fun isSpeechRecognitionAvailable(context: Context): Boolean = runCatching {
+        SpeechRecognizer.isRecognitionAvailable(context)
+    }.getOrDefault(false)
 
     fun hasOverlay(context: Context): Boolean = runCatching {
         Settings.canDrawOverlays(context)
@@ -87,7 +107,10 @@ object PermissionManager {
         notificationListenerEnabled = isNotificationListenerEnabled(context),
         deviceAdminActive = isDeviceAdminActive(context),
         batteryOptimizationIgnored = isBatteryOptimizationIgnored(context),
-        isDefaultSmsHandler = isDefaultSmsApp(context)
+        isDefaultSmsHandler = isDefaultSmsApp(context),
+        contactsGranted = hasContacts(context),
+        callPhoneGranted = hasCallPhone(context),
+        speechRecognitionAvailable = isSpeechRecognitionAvailable(context)
     )
 
     fun appDetailsIntent(context: Context): Intent =

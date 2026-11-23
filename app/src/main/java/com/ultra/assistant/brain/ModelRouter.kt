@@ -2,6 +2,7 @@ package com.ultra.assistant.brain
 
 import android.util.Log
 import com.google.firebase.Firebase
+import com.google.firebase.FirebaseApp
 import com.google.firebase.ai.ai
 import com.google.firebase.ai.type.Schema
 import com.google.firebase.ai.type.content
@@ -39,7 +40,7 @@ class ModelRouter(
     private val decisionSchema = Schema.obj(
         properties = mapOf(
             "thoughtSummary" to Schema.string(description = "Brief reasoning summary"),
-            "reply" to Schema.string(description = "Natural concise response in user's language without Markdown"),
+            "reply" to Schema.string(description = "Natural warm human-like conversational response in user's language without Markdown"),
             "toolCalls" to Schema.array(
                 items = Schema.obj(
                     properties = mapOf(
@@ -56,39 +57,32 @@ class ModelRouter(
         optionalProperties = listOf("memoryTitle", "memoryContent")
     )
 
-    private val defaultGeminiPlanner by lazy {
-        Firebase.ai.generativeModel(
-            modelName = "gemini-3.8-flash",
-            generationConfig = generationConfig {
-                responseMimeType = "application/json"
-                responseSchema = decisionSchema
-            }
-        )
-    }
+    private val defaultGeminiPlanner by lazy { createPlannerModel("gemini-3.8-flash") }
+    private val liteGeminiPlanner by lazy { createPlannerModel("gemini-3.5-flash-lite") }
+    private val argonGeminiPlanner by lazy { createPlannerModel("gemini-4-argon") }
 
-    private val liteGeminiPlanner by lazy {
-        Firebase.ai.generativeModel(
-            modelName = "gemini-3.5-flash-lite",
-            generationConfig = generationConfig {
-                responseMimeType = "application/json"
-                responseSchema = decisionSchema
-            }
-        )
-    }
+    private val defaultStreamingModel by lazy { createStreamingModel("gemini-3.8-flash") }
+    private val liteStreamingModel by lazy { createStreamingModel("gemini-3.5-flash-lite") }
+    private val argonStreamingModel by lazy { createStreamingModel("gemini-4-argon") }
 
-    private val argonGeminiPlanner by lazy {
-        Firebase.ai.generativeModel(
-            modelName = "gemini-4-argon",
-            generationConfig = generationConfig {
-                responseMimeType = "application/json"
-                responseSchema = decisionSchema
-            }
-        )
-    }
+    private fun createPlannerModel(modelName: String) = Firebase.ai.generativeModel(
+        modelName = modelName,
+        generationConfig = generationConfig {
+            responseMimeType = "application/json"
+            responseSchema = decisionSchema
+        }
+    )
 
-    private val streamingGeminiModel by lazy {
-        Firebase.ai.generativeModel(modelName = "gemini-3.8-flash")
-    }
+    private fun createStreamingModel(modelName: String) = Firebase.ai.generativeModel(
+        modelName = modelName,
+        systemInstruction = content {
+            text(
+                "You are ULTRA AI, a warm, intelligent, human-like voice and chat assistant similar to ChatGPT. " +
+                    "Respond naturally in the user's language (English, Bengali, or Hindi) with clear conversational rhythm, " +
+                    "remember prior turns in the conversation, and avoid unnecessary Markdown formatting in spoken replies."
+            )
+        }
+    )
 
     override suspend fun reasonAndPlan(
         userMessage: String,
@@ -99,7 +93,14 @@ class ModelRouter(
         languageLabel: String
     ): Result<Pair<String, ReasoningDecision>> {
         val settings = settingsRepository.settingsFlow.first()
-        val prompt = buildPlannerPrompt(userMessage, history, memoryContext, toolCatalogJson, screenContext, languageLabel)
+        val prompt = buildPlannerPrompt(
+            userMessage = userMessage,
+            history = history,
+            memoryContext = memoryContext,
+            toolCatalogJson = toolCatalogJson,
+            screenContext = screenContext,
+            languageLabel = languageLabel
+        )
 
         return when (settings.aiProviderMode) {
             AiProviderMode.CLOUDFLARE_WORKER -> {
@@ -120,9 +121,9 @@ class ModelRouter(
         configuredModel: String,
         prompt: String
     ): Result<Pair<String, ReasoningDecision>> {
-        val firebaseReady = runCatching { com.google.firebase.FirebaseApp.getInstance() }.isSuccess
+        val firebaseReady = runCatching { FirebaseApp.getInstance() }.isSuccess
         if (!firebaseReady) {
-            return Result.failure(IllegalStateException("Firebase AI is not configured in this build (missing google-services.json)."))
+            return Result.failure(IllegalStateException("Firebase AI is not initialized in this build."))
         }
         val model = when (configuredModel) {
             "gemini-3.5-flash-lite" -> liteGeminiPlanner
@@ -133,12 +134,12 @@ class ModelRouter(
             val response = withTimeout(60_000L) {
                 model.generateContent(prompt)
             }
-            val rawJson = response.text ?: return Result.failure(IllegalStateException("Gemini returned empty text."))
+            val rawJson = response.text ?: return Result.failure(IllegalStateException("Gemini returned empty response."))
             val decision = parseDecisionJson(rawJson)
-            Result.success("Firebase AI ($configuredModel)" to decision)
+            Result.success("Online • ${configuredModel}" to decision)
         } catch (e: TimeoutCancellationException) {
             Log.e(TAG, "Gemini planning timed out", e)
-            Result.failure(IllegalStateException("AI request timed out after 60s. Please retry."))
+            Result.failure(IllegalStateException("Online AI timed out after 60s. Please retry."))
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -158,8 +159,8 @@ class ModelRouter(
             val cleanBase = baseUrl.trim().trimEnd('/')
             val endpoint = "$cleanBase/api/voice"
             val historyArray = JSONArray().apply {
-                history.takeLast(8).forEach { (role, content) ->
-                    put(JSONObject().put("role", role).put("content", content.take(1200)))
+                history.takeLast(10).forEach { (role, content) ->
+                    put(JSONObject().put("role", role).put("content", content.take(1500)))
                 }
             }
             val bodyJson = JSONObject().apply {
@@ -201,12 +202,12 @@ class ModelRouter(
                     directReply = reply.ifBlank { "Done." },
                     plannedTools = toolCalls
                 )
-                Result.success("Cloudflare Worker" to decision)
+                Result.success("Online • Cloudflare Worker" to decision)
             }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.w(TAG, "Cloudflare Worker fallback failed: ${e.message}")
+            Log.w(TAG, "Cloudflare Worker call failed: ${e.message}")
             Result.failure(e)
         }
     }
@@ -216,16 +217,57 @@ class ModelRouter(
         history: List<Pair<String, String>>,
         languageLabel: String
     ): Flow<String> = flow {
-        val firebaseReady = runCatching { com.google.firebase.FirebaseApp.getInstance() }.isSuccess
-        if (!firebaseReady) {
-            emit("Firebase AI is unavailable in this build. Configure google-services.json or use Cloudflare Worker mode.")
+        val settings = settingsRepository.settingsFlow.first()
+        val firebaseReady = runCatching { FirebaseApp.getInstance() }.isSuccess
+        if (!firebaseReady || settings.aiProviderMode == AiProviderMode.CLOUDFLARE_WORKER) {
+            val workerRes = callCloudflareWorkerAgent(settings.workerEndpoint, prompt, history, "[]", languageLabel)
+            workerRes.fold(
+                onSuccess = { (_, decision) -> emit(decision.directReply) },
+                onFailure = { err ->
+                    if (firebaseReady) {
+                        streamFromGemini(settings.geminiModel, prompt, history, languageLabel).collect { emit(it) }
+                    } else {
+                        throw err
+                    }
+                }
+            )
             return@flow
         }
-        val fullPrompt = "You are ULTRA AI, a helpful multilingual assistant ($languageLabel). Keep replies concise and natural.\n$prompt"
-        val chatHistory = history.takeLast(6).map { (role, text) ->
+
+        try {
+            streamFromGemini(settings.geminiModel, prompt, history, languageLabel).collect { emit(it) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "Streaming via Firebase AI failed, checking fallback", e)
+            if (settings.aiProviderMode == AiProviderMode.AUTO) {
+                val workerRes = callCloudflareWorkerAgent(settings.workerEndpoint, prompt, history, "[]", languageLabel)
+                workerRes.fold(
+                    onSuccess = { (_, decision) -> emit(decision.directReply) },
+                    onFailure = { throw e }
+                )
+            } else {
+                throw e
+            }
+        }
+    }
+
+    private fun streamFromGemini(
+        configuredModel: String,
+        prompt: String,
+        history: List<Pair<String, String>>,
+        languageLabel: String
+    ): Flow<String> = flow {
+        val model = when (configuredModel) {
+            "gemini-3.5-flash-lite" -> liteStreamingModel
+            "gemini-4-argon" -> argonStreamingModel
+            else -> defaultStreamingModel
+        }
+        val chatHistory = history.takeLast(12).map { (role, text) ->
             content(if (role == "user") "user" else "model") { text(text) }
         }
-        val chat = streamingGeminiModel.startChat(chatHistory)
+        val chat = model.startChat(chatHistory)
+        val fullPrompt = "Language preference: $languageLabel (match user's language if they write/speak in English, Bengali, or Hindi).\n$prompt"
         val buffer = StringBuilder()
         withTimeout(60_000L) {
             chat.sendMessageStream(fullPrompt).collect { chunk ->
@@ -285,10 +327,11 @@ class ModelRouter(
         screenContext: String,
         languageLabel: String
     ): String {
-        val historyBlock = if (history.isEmpty()) "None" else history.takeLast(6).joinToString("\n") { "${it.first}: ${it.second}" }
+        val historyBlock = if (history.isEmpty()) "None" else history.takeLast(10).joinToString("\n") { "${it.first}: ${it.second}" }
         return """
-You are ULTRA AI, a JARVIS-style Android AI Agent.
-Preferred language: $languageLabel (respond in the user's language: Bengali, Hindi, or English; avoid Markdown in spoken replies).
+You are ULTRA AI, a warm, intelligent, human-like Android AI assistant and autonomous task agent similar to ChatGPT.
+Preferred language: $languageLabel (respond naturally in the user's language: Bengali, Hindi, or English; avoid Markdown symbols like ** or # so voice playback sounds natural).
+Think step by step for multi-step tasks and pick the exact tools needed from the catalog.
 Never claim you completed a device action unless you schedule the corresponding tool in toolCalls.
 Never invent shell commands or arbitrary code. Only use registered tools from the catalog.
 Do not store sensitive OTPs, passwords, or private SMS/notification contents in memoryTitle/memoryContent.

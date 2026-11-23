@@ -30,8 +30,13 @@ class TaskExecutor(
         }
 
         val settings = settingsRepository.settingsFlow.first()
-        val needsGate = (tool.riskLevel == RiskLevel.HIGH ||
-            (tool.id == "prepare_sms" && settings.requireSmsConfirmation)) && !userConfirmed
+        val needsGate = when {
+            userConfirmed -> false
+            tool.id == "prepare_sms" -> settings.requireSmsConfirmation
+            tool.id == "make_phone_call" -> settings.requireCallConfirmation
+            tool.riskLevel == RiskLevel.HIGH -> true
+            else -> false
+        }
         if (needsGate) {
             val summary = "Confirmation required before executing ${tool.title}."
             memoryManager.recordAuditLog(tool.id, tool.riskLevel.name, "AWAITING_CONFIRMATION", summary, verified = false)

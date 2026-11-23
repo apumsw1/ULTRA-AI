@@ -1,7 +1,6 @@
 package com.ultra.assistant.ui
 
 import android.content.Context
-import android.provider.Settings
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.ultra.assistant.automation.RuleManager
@@ -10,6 +9,7 @@ import com.ultra.assistant.brain.AgentExecutionReport
 import com.ultra.assistant.brain.AgentManager
 import com.ultra.assistant.brain.PendingToolConfirmation
 import com.ultra.assistant.brain.UiState
+import com.ultra.assistant.control.AccessibleScreenSnapshot
 import com.ultra.assistant.control.AppController
 import com.ultra.assistant.control.BrowserController
 import com.ultra.assistant.control.CapturedNotification
@@ -20,16 +20,21 @@ import com.ultra.assistant.control.NotificationRepository
 import com.ultra.assistant.control.ScreenController
 import com.ultra.assistant.control.SmsCapabilityReport
 import com.ultra.assistant.control.SmsController
-import com.ultra.assistant.control.AccessibleScreenSnapshot
 import com.ultra.assistant.control.UltraAccessibilityService
+import com.ultra.assistant.data.AiOperatingMode
 import com.ultra.assistant.data.AiProviderMode
+import com.ultra.assistant.data.ChatBackgroundStyle
 import com.ultra.assistant.data.LocalSettingsRepository
+import com.ultra.assistant.data.NetworkMonitor
 import com.ultra.assistant.data.UltraSettings
+import com.ultra.assistant.data.UltraThemeStyle
+import com.ultra.assistant.data.VoiceGender
 import com.ultra.assistant.firebase.CloudSyncRepository
 import com.ultra.assistant.firebase.SyncedMemory
 import com.ultra.assistant.memory.AuditLogEntity
 import com.ultra.assistant.memory.AutomationRuleEntity
 import com.ultra.assistant.memory.ConversationMessageEntity
+import com.ultra.assistant.memory.ConversationSessionEntity
 import com.ultra.assistant.memory.MemoryManager
 import com.ultra.assistant.memory.MemoryRecordEntity
 import com.ultra.assistant.permissions.PermissionAuditSnapshot
@@ -54,7 +59,8 @@ class UltraViewModel(
     private val settingsRepository: LocalSettingsRepository,
     private val cloudSyncRepository: CloudSyncRepository,
     private val memoryManager: MemoryManager,
-    private val agentManager: AgentManager
+    private val agentManager: AgentManager,
+    private val networkMonitor: NetworkMonitor = NetworkMonitor(appContext)
 ) : ViewModel() {
 
     private val appController = AppController(appContext)
@@ -68,8 +74,15 @@ class UltraViewModel(
     val settings: StateFlow<UltraSettings> = settingsRepository.settingsFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UltraSettings())
 
+    val isOnline: StateFlow<Boolean> = networkMonitor.isOnline
+
     val memories: StateFlow<List<MemoryRecordEntity>> = memoryManager.memoriesFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), emptyList())
+
+    val sessions: StateFlow<List<ConversationSessionEntity>> = memoryManager.sessionsFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), emptyList())
+
+    val activeSessionId: StateFlow<String> = memoryManager.activeSessionIdFlow
 
     val conversations: StateFlow<List<ConversationMessageEntity>> = memoryManager.conversationFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), emptyList())
@@ -94,6 +107,8 @@ class UltraViewModel(
 
     val latestAgentReport: StateFlow<AgentExecutionReport?> = agentManager.latestReportFlow
     val pendingConfirmation: StateFlow<PendingToolConfirmation?> = agentManager.pendingConfirmationFlow
+    val streamingReply: StateFlow<String> = agentManager.streamingReplyFlow
+    val isStreaming: StateFlow<Boolean> = agentManager.isStreamingFlow
     val notifications: StateFlow<List<CapturedNotification>> = NotificationRepository.notificationsFlow
     val screenSnapshot: StateFlow<AccessibleScreenSnapshot?> = UltraAccessibilityService.latestSnapshotFlow
 
@@ -128,13 +143,14 @@ class UltraViewModel(
         }
     }
 
-    fun submitCommand(input: String) {
+    fun submitCommand(input: String, onFinished: ((AgentExecutionReport) -> Unit)? = null) {
         val clean = input.trim()
         if (clean.isBlank() || _isAgentBusy.value) return
         viewModelScope.launch {
             _isAgentBusy.value = true
             try {
-                agentManager.handleUserCommand(clean)
+                val report = agentManager.handleUserCommand(clean)
+                onFinished?.invoke(report)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -143,6 +159,31 @@ class UltraViewModel(
                 _isAgentBusy.value = false
                 refreshSystemState()
             }
+        }
+    }
+
+    fun startNewConversation() {
+        viewModelScope.launch {
+            memoryManager.startNewSession()
+            _statusBanner.value = "Started a new conversation."
+        }
+    }
+
+    fun selectConversationSession(sessionId: String) {
+        memoryManager.selectSession(sessionId)
+    }
+
+    fun deleteConversationSession(sessionId: String) {
+        viewModelScope.launch {
+            memoryManager.deleteSession(sessionId)
+            _statusBanner.value = "Conversation removed."
+        }
+    }
+
+    fun clearConversationHistoryOnly() {
+        viewModelScope.launch {
+            memoryManager.clearConversationHistory()
+            _statusBanner.value = "Conversation history cleared."
         }
     }
 
@@ -288,9 +329,61 @@ class UltraViewModel(
         }
     }
 
+    fun updateVoiceGender(gender: VoiceGender) {
+        viewModelScope.launch {
+            settingsRepository.updateSettings { it.copy(voiceGender = gender) }
+            _statusBanner.value = "Voice switched to ${gender.label}."
+        }
+    }
+
     fun updateVoiceTuning(speed: Float, pitch: Float) {
         viewModelScope.launch {
             settingsRepository.updateSettings { it.copy(voiceSpeed = speed, voicePitch = pitch) }
+        }
+    }
+
+    fun updateVoiceVolume(volume: Float) {
+        viewModelScope.launch {
+            settingsRepository.updateSettings { it.copy(voiceVolume = volume) }
+        }
+    }
+
+    fun updateOperatingMode(mode: AiOperatingMode) {
+        viewModelScope.launch {
+            settingsRepository.updateSettings { it.copy(operatingMode = mode) }
+            _statusBanner.value = "Switched to ${mode.label}."
+        }
+    }
+
+    fun updateAppearanceConfig(
+        backgroundStyle: ChatBackgroundStyle,
+        themeStyle: UltraThemeStyle,
+        ambientEdgeGlowEnabled: Boolean
+    ) {
+        viewModelScope.launch {
+            settingsRepository.updateSettings {
+                it.copy(
+                    backgroundStyle = backgroundStyle,
+                    uiThemeStyle = themeStyle,
+                    ambientEdgeGlowEnabled = ambientEdgeGlowEnabled
+                )
+            }
+        }
+    }
+
+    fun updateAssistantBehavior(
+        floatingEnabled: Boolean,
+        continuousListening: Boolean,
+        requireCallConfirmation: Boolean
+    ) {
+        viewModelScope.launch {
+            settingsRepository.updateSettings {
+                it.copy(
+                    floatingAssistantEnabled = floatingEnabled,
+                    continuousListening = continuousListening,
+                    requireCallConfirmation = requireCallConfirmation
+                )
+            }
         }
     }
 
@@ -308,7 +401,8 @@ class UltraViewModel(
         encryptCloud: Boolean,
         ttlDays: Int,
         notifContext: Boolean,
-        smsConfirm: Boolean
+        smsConfirm: Boolean,
+        callConfirm: Boolean = settings.value.requireCallConfirmation
     ) {
         viewModelScope.launch {
             settingsRepository.updateSettings {
@@ -317,7 +411,8 @@ class UltraViewModel(
                     encryptCloudMemory = encryptCloud,
                     memoryTtlDays = ttlDays,
                     allowNotificationContext = notifContext,
-                    requireSmsConfirmation = smsConfirm
+                    requireSmsConfirmation = smsConfirm,
+                    requireCallConfirmation = callConfirm
                 )
             }
             _statusBanner.value = "Privacy & Memory settings saved."

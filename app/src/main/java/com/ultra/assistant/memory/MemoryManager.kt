@@ -4,7 +4,11 @@ import android.content.Context
 import com.ultra.assistant.data.LocalSettingsRepository
 import com.ultra.assistant.firebase.CloudSyncRepository
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flatMapLatest
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 
@@ -19,10 +23,44 @@ class MemoryManager(
     private val auditLogDao = db.auditLogDao()
     private val automationRuleDao = db.automationRuleDao()
 
+    private val _activeSessionId = MutableStateFlow("default")
+    val activeSessionIdFlow: StateFlow<String> = _activeSessionId.asStateFlow()
+
     val memoriesFlow: Flow<List<MemoryRecordEntity>> = memoryDao.observeAll()
-    val conversationFlow: Flow<List<ConversationMessageEntity>> = conversationDao.observeRecent(80)
+    val sessionsFlow: Flow<List<ConversationSessionEntity>> = conversationDao.observeSessions()
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    val conversationFlow: Flow<List<ConversationMessageEntity>> = _activeSessionId
+        .flatMapLatest { sid -> conversationDao.observeBySession(sid, 120) }
+
     val auditLogsFlow: Flow<List<AuditLogEntity>> = auditLogDao.observeRecent(100)
     val automationRulesFlow: Flow<List<AutomationRuleEntity>> = automationRuleDao.observeAll()
+
+    suspend fun startNewSession(): String {
+        val newId = "chat_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(6)}"
+        conversationDao.upsertSession(
+            ConversationSessionEntity(
+                id = newId,
+                title = "New Conversation",
+                createdAtMillis = System.currentTimeMillis(),
+                updatedAtMillis = System.currentTimeMillis()
+            )
+        )
+        _activeSessionId.value = newId
+        return newId
+    }
+
+    fun selectSession(sessionId: String) {
+        _activeSessionId.value = sessionId
+    }
+
+    suspend fun deleteSession(sessionId: String) {
+        conversationDao.clearSessionMessages(sessionId)
+        conversationDao.deleteSession(sessionId)
+        if (_activeSessionId.value == sessionId) {
+            _activeSessionId.value = "default"
+        }
+    }
 
     suspend fun saveMemory(
         category: String,
@@ -90,24 +128,64 @@ class MemoryManager(
         return memoryDao.purgeExpired(System.currentTimeMillis())
     }
 
-    suspend fun recordConversationTurn(role: String, content: String, languageTag: String) {
-        val safeContent = PrivacyGuard.redact(content).take(2500)
+    suspend fun recordConversationTurn(
+        role: String,
+        content: String,
+        languageTag: String,
+        providerLabel: String = ""
+    ) {
+        val sid = _activeSessionId.value
+        val now = System.currentTimeMillis()
+        val safeContent = PrivacyGuard.redact(content).take(4000)
+
+        val existingCount = conversationDao.getLatestForSession(sid, 1).size
+        val titleHint = if (role == "user" && existingCount == 0) {
+            safeContent.trim().take(42).ifBlank { "Conversation" }
+        } else null
+
+        if (titleHint != null) {
+            conversationDao.upsertSession(
+                ConversationSessionEntity(
+                    id = sid,
+                    title = titleHint,
+                    createdAtMillis = now,
+                    updatedAtMillis = now
+                )
+            )
+        } else if (role == "user") {
+            val existingSessions = conversationDao.observeSessions().first()
+            val currentSession = existingSessions.firstOrNull { it.id == sid }
+            conversationDao.upsertSession(
+                ConversationSessionEntity(
+                    id = sid,
+                    title = currentSession?.title?.takeIf { it != "New Conversation" }
+                        ?: safeContent.trim().take(42).ifBlank { "Conversation" },
+                    createdAtMillis = currentSession?.createdAtMillis ?: now,
+                    updatedAtMillis = now
+                )
+            )
+        }
+
         conversationDao.insert(
             ConversationMessageEntity(
+                sessionId = sid,
                 role = role,
                 content = safeContent,
                 languageTag = languageTag,
-                timestampMillis = System.currentTimeMillis()
+                providerLabel = providerLabel,
+                timestampMillis = now
             )
         )
     }
 
-    suspend fun getRecentConversation(limit: Int = 10): List<ConversationMessageEntity> {
-        return conversationDao.getLatest(limit).reversed()
+    suspend fun getRecentConversation(limit: Int = 14): List<ConversationMessageEntity> {
+        return conversationDao.getLatestForSession(_activeSessionId.value, limit).reversed()
     }
 
     suspend fun clearConversationHistory() {
         conversationDao.clearAll()
+        conversationDao.clearAllSessions()
+        _activeSessionId.value = "default"
     }
 
     suspend fun recordAuditLog(

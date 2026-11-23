@@ -35,9 +35,22 @@ class AppController(context: Context) {
         val clean = query.trim().lowercase()
         if (clean.isBlank()) return null
         val apps = listInstalledApps()
-        return apps.firstOrNull { it.label.lowercase() == clean || it.packageName.lowercase() == clean }
-            ?: apps.firstOrNull { it.label.lowercase().startsWith(clean) }
-            ?: apps.firstOrNull { it.label.lowercase().contains(clean) || it.packageName.lowercase().contains(clean) }
+        val aliases = mapOf(
+            "yt" to "youtube",
+            "ইউটিউব" to "youtube",
+            "यूट्यूब" to "youtube",
+            "হোয়াটসঅ্যাপ" to "whatsapp",
+            "व्हाट्सएप" to "whatsapp",
+            "ক্রোম" to "chrome",
+            "ক্যামেরা" to "camera",
+            "সেটিংস" to "settings",
+            "सेटिंग्स" to "settings",
+            "ক্যালকুলেটর" to "calculator"
+        )
+        val normalized = aliases[clean] ?: clean
+        return apps.firstOrNull { it.label.lowercase() == normalized || it.packageName.lowercase() == normalized }
+            ?: apps.firstOrNull { it.label.lowercase().startsWith(normalized) }
+            ?: apps.firstOrNull { it.label.lowercase().contains(normalized) || it.packageName.lowercase().contains(normalized) }
     }
 
     fun isAppAvailable(query: String): Boolean = findApp(query) != null
@@ -75,6 +88,70 @@ class AppController(context: Context) {
             }
         }
         return openSettingsAction(Settings.ACTION_WIFI_SETTINGS)
+    }
+
+    fun openVolumePanel(): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val panel = Intent(Settings.Panel.ACTION_VOLUME).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            if (panel.resolveActivity(pm) != null) {
+                return runCatching { appContext.startActivity(panel); true }.getOrDefault(false)
+            }
+        }
+        return openSettingsAction(Settings.ACTION_SOUND_SETTINGS)
+    }
+
+    fun openDeviceSettings(target: String): Result<String> {
+        val key = target.trim().lowercase()
+        return when {
+            key in setOf("wifi", "wi-fi", "internet", "connectivity") -> {
+                if (openWifiPanel()) Result.success("Opened Wi-Fi & internet connectivity panel.")
+                else Result.failure(IllegalStateException("Unable to open Wi-Fi settings."))
+            }
+            key in setOf("bluetooth", "bt") -> {
+                if (openSettingsAction(Settings.ACTION_BLUETOOTH_SETTINGS)) Result.success("Opened Bluetooth settings.")
+                else Result.failure(IllegalStateException("Unable to open Bluetooth settings."))
+            }
+            key in setOf("network", "wireless", "mobile_data", "data") -> {
+                if (openSettingsAction(Settings.ACTION_WIRELESS_SETTINGS)) Result.success("Opened network & wireless settings.")
+                else Result.failure(IllegalStateException("Unable to open network settings."))
+            }
+            key in setOf("sound", "volume", "audio") -> {
+                if (openVolumePanel()) Result.success("Opened sound & volume panel.")
+                else Result.failure(IllegalStateException("Unable to open sound settings."))
+            }
+            key in setOf("brightness", "display", "screen") -> {
+                if (openSettingsAction(Settings.ACTION_DISPLAY_SETTINGS)) Result.success("Opened display & brightness settings.")
+                else Result.failure(IllegalStateException("Unable to open display settings."))
+            }
+            key in setOf("notifications", "notification") -> {
+                val action = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    Settings.ACTION_APP_NOTIFICATION_SETTINGS
+                } else {
+                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS
+                }
+                val intent = Intent(action).apply {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        putExtra(Settings.EXTRA_APP_PACKAGE, appContext.packageName)
+                    }
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                runCatching {
+                    appContext.startActivity(intent)
+                    "Opened notification settings."
+                }.recoverCatching {
+                    openSettingsAction(Settings.ACTION_SETTINGS)
+                    "Opened system settings."
+                }
+            }
+            key in setOf("battery", "power") -> {
+                if (openSettingsAction(Settings.ACTION_BATTERY_SAVER_SETTINGS)) Result.success("Opened battery settings.")
+                else Result.failure(IllegalStateException("Unable to open battery settings."))
+            }
+            else -> {
+                if (openSettingsAction(Settings.ACTION_SETTINGS)) Result.success("Opened Android system settings.")
+                else Result.failure(IllegalStateException("Unable to open system settings."))
+            }
+        }
     }
 
     fun openSettingsAction(action: String): Boolean {

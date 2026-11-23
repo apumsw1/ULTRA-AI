@@ -24,12 +24,13 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.AutoMode
 import androidx.compose.material.icons.filled.Build
-import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarDefaults
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationRail
 import androidx.compose.material3.NavigationRailItem
@@ -50,6 +51,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -69,6 +71,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.google.firebase.Firebase
 import com.google.firebase.auth.auth
+import com.ultra.assistant.data.UltraSettings
 import com.ultra.assistant.firebase.authStateFlow
 import com.ultra.assistant.firebase.configureAppCheck
 import com.ultra.assistant.firebase.isFirebaseInitialized
@@ -79,6 +82,8 @@ import com.ultra.assistant.ui.UltraViewModel
 import com.ultra.assistant.ui.apps.AppManagerScreen
 import com.ultra.assistant.ui.auth.AuthScreen
 import com.ultra.assistant.ui.automation.AutomationScreen
+import com.ultra.assistant.ui.components.AmbientEdgeGlow
+import com.ultra.assistant.ui.components.ChatBackgroundLayer
 import com.ultra.assistant.ui.components.SensitiveConfirmationDialog
 import com.ultra.assistant.ui.home.HomeScreen
 import com.ultra.assistant.ui.settings.SettingsScreen
@@ -102,7 +107,7 @@ private data class NavTab(
 )
 
 private val primaryTabs = listOf(
-    NavTab(UltraRoutes.HOME, "Home", Icons.Default.Home),
+    NavTab(UltraRoutes.HOME, "Chat", Icons.Default.Chat),
     NavTab(UltraRoutes.VOICE, "Voice", Icons.Default.Mic),
     NavTab(UltraRoutes.CONTROL, "Control", Icons.Default.Build),
     NavTab(UltraRoutes.AUTOMATION, "Auto", Icons.Default.AutoMode),
@@ -111,26 +116,47 @@ private val primaryTabs = listOf(
 )
 
 class MainActivity : ComponentActivity() {
+    private val pendingRoute = mutableStateOf<String?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // Mandatory: configure App Check with launch intent before any Compose UI or ViewModels
         configureAppCheck(this, intent)
+        pendingRoute.value = intent?.getStringExtra("open_route")
         enableEdgeToEdge()
         setContent {
-            UltraTheme {
+            val rootSettings by UltraRuntime.settingsRepository(applicationContext)
+                .settingsFlow
+                .collectAsStateWithLifecycle(initialValue = UltraSettings())
+
+            UltraTheme(themeStyle = rootSettings.uiThemeStyle) {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    UltraAppRoot()
+                    UltraAppRoot(
+                        requestedRoute = pendingRoute.value,
+                        onRouteConsumed = { pendingRoute.value = null }
+                    )
                 }
             }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        intent.getStringExtra("open_route")?.let {
+            pendingRoute.value = it
         }
     }
 }
 
 @Composable
-fun UltraAppRoot() {
+fun UltraAppRoot(
+    requestedRoute: String? = null,
+    onRouteConsumed: () -> Unit = {}
+) {
     val context = LocalContext.current
     val firebaseReady = remember(context) { isFirebaseInitialized(context) }
     var offlineModeActive by remember { mutableStateOf(false) }
@@ -140,6 +166,8 @@ fun UltraAppRoot() {
             UltraAuthenticatedShell(
                 currentUserId = "local_offline_user",
                 userEmail = "Offline Local Mode",
+                requestedRoute = requestedRoute,
+                onRouteConsumed = onRouteConsumed,
                 onOfflineExit = { offlineModeActive = false }
             )
         } else {
@@ -173,7 +201,9 @@ fun UltraAppRoot() {
         key(user.uid) {
             UltraAuthenticatedShell(
                 currentUserId = user.uid,
-                userEmail = user.email
+                userEmail = user.email,
+                requestedRoute = requestedRoute,
+                onRouteConsumed = onRouteConsumed
             )
         }
     }
@@ -183,6 +213,8 @@ fun UltraAppRoot() {
 fun UltraAuthenticatedShell(
     currentUserId: String,
     userEmail: String?,
+    requestedRoute: String? = null,
+    onRouteConsumed: () -> Unit = {},
     onOfflineExit: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
@@ -198,25 +230,32 @@ fun UltraAuthenticatedShell(
                 val cloudRepo = UltraRuntime.cloudSyncRepository(app)
                 val memoryMgr = UltraRuntime.memoryManager(app)
                 val agentMgr = UltraRuntime.agentManager(app)
+                val netMon = UltraRuntime.networkMonitor(app)
                 UltraViewModel(
                     appContext = app.applicationContext,
                     currentUserId = currentUserId,
                     settingsRepository = settingsRepo,
                     cloudSyncRepository = cloudRepo,
                     memoryManager = memoryMgr,
-                    agentManager = agentMgr
+                    agentManager = agentMgr,
+                    networkMonitor = netMon
                 )
             }
         }
     )
 
     val settings by viewModel.settings.collectAsStateWithLifecycle()
+    val isOnline by viewModel.isOnline.collectAsStateWithLifecycle()
     val memories by viewModel.memories.collectAsStateWithLifecycle()
+    val sessions by viewModel.sessions.collectAsStateWithLifecycle()
+    val activeSessionId by viewModel.activeSessionId.collectAsStateWithLifecycle()
     val conversations by viewModel.conversations.collectAsStateWithLifecycle()
     val auditLogs by viewModel.auditLogs.collectAsStateWithLifecycle()
     val automationRules by viewModel.automationRules.collectAsStateWithLifecycle()
     val latestReport by viewModel.latestAgentReport.collectAsStateWithLifecycle()
     val pendingConfirmation by viewModel.pendingConfirmation.collectAsStateWithLifecycle()
+    val streamingReply by viewModel.streamingReply.collectAsStateWithLifecycle()
+    val isStreaming by viewModel.isStreaming.collectAsStateWithLifecycle()
     val notifications by viewModel.notifications.collectAsStateWithLifecycle()
     val screenSnapshot by viewModel.screenSnapshot.collectAsStateWithLifecycle()
     val isBusy by viewModel.isAgentBusy.collectAsStateWithLifecycle()
@@ -231,6 +270,7 @@ fun UltraAuthenticatedShell(
     var partialTranscript by remember { mutableStateOf("") }
     var lastRecognizedText by remember { mutableStateOf("") }
     var lastAgentReply by remember { mutableStateOf("") }
+    var pendingDotLaunch by remember { mutableStateOf(false) }
 
     val snackbarHostState = remember { SnackbarHostState() }
     LaunchedEffect(statusBanner) {
@@ -295,33 +335,53 @@ fun UltraAuthenticatedShell(
         }
     }
 
+    val dispatchVoiceIntent: (Intent) -> Boolean = { svcIntent ->
+        runCatching {
+            if (VoiceAssistantService.isRunning) {
+                context.startService(svcIntent)
+            } else {
+                ContextCompat.startForegroundService(context, svcIntent)
+            }
+        }.isSuccess
+    }
+
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
     ) { results ->
         viewModel.refreshSystemState()
-        if (results.values.all { it }) {
-            val started = runCatching {
-                ContextCompat.startForegroundService(context, Intent(context, VoiceAssistantService::class.java))
-            }.isSuccess
-            isServiceRunning = started
-            Toast.makeText(
-                context,
-                if (started) "ULTRA AI voice active" else "Could not start voice service right now.",
-                Toast.LENGTH_SHORT
-            ).show()
+        val micGranted = PermissionManager.hasMicrophone(context)
+        if (micGranted || results.values.all { it }) {
+            val action = if (pendingDotLaunch) VoiceAssistantService.ACTION_SHOW_DOT else VoiceAssistantService.ACTION_START
+            pendingDotLaunch = false
+            val started = dispatchVoiceIntent(Intent(context, VoiceAssistantService::class.java).setAction(action))
+            isServiceRunning = started || VoiceAssistantService.isRunning
+            if (action == VoiceAssistantService.ACTION_SHOW_DOT && started) {
+                viewModel.updateAssistantBehavior(true, settings.continuousListening, settings.requireCallConfirmation)
+                Toast.makeText(context, "Floating assistant active", Toast.LENGTH_SHORT).show()
+            } else if (started) {
+                Toast.makeText(context, "ULTRA AI voice active", Toast.LENGTH_SHORT).show()
+            }
         } else {
+            pendingDotLaunch = false
             Toast.makeText(context, "Microphone permission is required for voice control", Toast.LENGTH_LONG).show()
         }
+    }
+
+    val contactsPhoneLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) {
+        viewModel.refreshSystemState()
     }
 
     val startVoiceAssistant: () -> Unit = {
         val missing = PermissionManager.missing(context)
         if (missing.isNotEmpty()) {
+            pendingDotLaunch = false
             permissionLauncher.launch(missing.toTypedArray())
         } else {
-            val started = runCatching {
-                ContextCompat.startForegroundService(context, Intent(context, VoiceAssistantService::class.java))
-            }.isSuccess
+            val started = dispatchVoiceIntent(
+                Intent(context, VoiceAssistantService::class.java).setAction(VoiceAssistantService.ACTION_START)
+            )
             isServiceRunning = started
             if (!started) {
                 Toast.makeText(context, "Unable to start foreground voice service.", Toast.LENGTH_SHORT).show()
@@ -344,23 +404,69 @@ fun UltraAuthenticatedShell(
             runCatching {
                 context.startService(Intent(context, VoiceAssistantService::class.java).setAction(VoiceAssistantService.ACTION_INTERRUPT))
             }
+        } else {
+            startVoiceAssistant()
+        }
+    }
+
+    val stopSpeakingOnly: () -> Unit = {
+        if (VoiceAssistantService.isRunning) {
+            runCatching {
+                context.startService(Intent(context, VoiceAssistantService::class.java).setAction(VoiceAssistantService.ACTION_STOP_SPEAKING))
+            }
+        }
+    }
+
+    val speakTextOutLoud: (String) -> Unit = { text ->
+        if (PermissionManager.hasMicrophone(context)) {
+            dispatchVoiceIntent(
+                Intent(context, VoiceAssistantService::class.java)
+                    .setAction(VoiceAssistantService.ACTION_SPEAK_TEXT)
+                    .putExtra(VoiceAssistantService.EXTRA_SPEAK_TEXT, text)
+            )
+        } else {
+            val missing = PermissionManager.missing(context)
+            if (missing.isNotEmpty()) permissionLauncher.launch(missing.toTypedArray())
+        }
+    }
+
+    val testVoicePreview: () -> Unit = {
+        if (PermissionManager.hasMicrophone(context)) {
+            dispatchVoiceIntent(
+                Intent(context, VoiceAssistantService::class.java).setAction(VoiceAssistantService.ACTION_TEST_VOICE)
+            )
+        } else {
+            val missing = PermissionManager.missing(context)
+            if (missing.isNotEmpty()) permissionLauncher.launch(missing.toTypedArray())
         }
     }
 
     val enableFloatingDot: () -> Unit = {
         if (!PermissionManager.hasOverlay(context)) {
             safeStartActivity(PermissionManager.overlaySettingsIntent(context))
+        } else if (!PermissionManager.hasMicrophone(context)) {
+            pendingDotLaunch = true
+            permissionLauncher.launch(PermissionManager.missing(context).toTypedArray())
         } else {
-            runCatching {
-                ContextCompat.startForegroundService(
-                    context,
-                    Intent(context, VoiceAssistantService::class.java).setAction(VoiceAssistantService.ACTION_SHOW_DOT)
-                )
-                Toast.makeText(context, "Floating U overlay enabled", Toast.LENGTH_SHORT).show()
-            }.onFailure {
+            val ok = dispatchVoiceIntent(
+                Intent(context, VoiceAssistantService::class.java).setAction(VoiceAssistantService.ACTION_SHOW_DOT)
+            )
+            if (ok) {
+                viewModel.updateAssistantBehavior(true, settings.continuousListening, settings.requireCallConfirmation)
+                Toast.makeText(context, "Floating assistant enabled", Toast.LENGTH_SHORT).show()
+            } else {
                 Toast.makeText(context, "Unable to enable floating overlay.", Toast.LENGTH_SHORT).show()
             }
         }
+    }
+
+    val disableFloatingDot: () -> Unit = {
+        if (VoiceAssistantService.isRunning) {
+            runCatching {
+                context.startService(Intent(context, VoiceAssistantService::class.java).setAction(VoiceAssistantService.ACTION_HIDE_DOT))
+            }
+        }
+        viewModel.updateAssistantBehavior(false, settings.continuousListening, settings.requireCallConfirmation)
     }
 
     val fixMissingPermission: (PermissionRequirement) -> Unit = { req ->
@@ -372,6 +478,11 @@ fun UltraAuthenticatedShell(
             PermissionRequirement.MICROPHONE, PermissionRequirement.POST_NOTIFICATIONS -> {
                 val missing = PermissionManager.missing(context)
                 if (missing.isNotEmpty()) permissionLauncher.launch(missing.toTypedArray())
+                else safeStartActivity(PermissionManager.appDetailsIntent(context))
+            }
+            PermissionRequirement.READ_CONTACTS, PermissionRequirement.CALL_PHONE -> {
+                val missingCp = PermissionManager.missingContactsAndPhone(context)
+                if (missingCp.isNotEmpty()) contactsPhoneLauncher.launch(missingCp.toTypedArray())
                 else safeStartActivity(PermissionManager.appDetailsIntent(context))
             }
             PermissionRequirement.DEFAULT_SMS_APP -> safeStartActivity(PermissionManager.appDetailsIntent(context))
@@ -390,168 +501,274 @@ fun UltraAuthenticatedShell(
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = backStackEntry?.destination?.route ?: UltraRoutes.HOME
 
-    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-        val useNavRail = maxWidth >= 600.dp
+    LaunchedEffect(requestedRoute) {
+        if (!requestedRoute.isNullOrBlank()) {
+            navController.navigate(requestedRoute) {
+                popUpTo(UltraRoutes.HOME) { saveState = true }
+                launchSingleTop = true
+                restoreState = true
+            }
+            onRouteConsumed()
+        }
+    }
 
-        Scaffold(
-            snackbarHost = { SnackbarHost(snackbarHostState) },
-            contentWindowInsets = WindowInsets.safeDrawing,
-            bottomBar = {
-                if (!useNavRail) {
-                    NavigationBar(
-                        modifier = Modifier.windowInsetsPadding(WindowInsets.navigationBars)
+    Box(modifier = Modifier.fillMaxSize()) {
+        ChatBackgroundLayer(backgroundStyle = settings.backgroundStyle)
+
+        BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+            val useNavRail = maxWidth >= 600.dp
+
+            Scaffold(
+                containerColor = Color.Transparent,
+                snackbarHost = { SnackbarHost(snackbarHostState) },
+                contentWindowInsets = WindowInsets.safeDrawing,
+                bottomBar = {
+                    if (!useNavRail) {
+                        NavigationBar(
+                            containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
+                            tonalElevation = NavigationBarDefaults.Elevation,
+                            modifier = Modifier.windowInsetsPadding(WindowInsets.navigationBars)
+                        ) {
+                            primaryTabs.forEach { tab ->
+                                NavigationBarItem(
+                                    selected = currentRoute == tab.route,
+                                    onClick = {
+                                        navController.navigate(tab.route) {
+                                            popUpTo(UltraRoutes.HOME) { saveState = true }
+                                            launchSingleTop = true
+                                            restoreState = true
+                                        }
+                                    },
+                                    icon = { Icon(tab.icon, contentDescription = tab.label) },
+                                    label = { Text(tab.label, maxLines = 1) }
+                                )
+                            }
+                        }
+                    }
+                }
+            ) { innerPadding ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(innerPadding)
+                ) {
+                    if (useNavRail) {
+                        NavigationRail(
+                            containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f)
+                        ) {
+                            primaryTabs.forEach { tab ->
+                                NavigationRailItem(
+                                    selected = currentRoute == tab.route,
+                                    onClick = {
+                                        navController.navigate(tab.route) {
+                                            popUpTo(UltraRoutes.HOME) { saveState = true }
+                                            launchSingleTop = true
+                                            restoreState = true
+                                        }
+                                    },
+                                    icon = { Icon(tab.icon, contentDescription = tab.label) },
+                                    label = { Text(tab.label) }
+                                )
+                            }
+                        }
+                    }
+
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.TopCenter
                     ) {
-                        primaryTabs.forEach { tab ->
-                            NavigationBarItem(
-                                selected = currentRoute == tab.route,
-                                onClick = {
-                                    navController.navigate(tab.route) {
-                                        popUpTo(UltraRoutes.HOME) { saveState = true }
-                                        launchSingleTop = true
-                                        restoreState = true
+                        NavHost(
+                            navController = navController,
+                            startDestination = UltraRoutes.HOME
+                        ) {
+                            composable(UltraRoutes.HOME) {
+                                HomeScreen(
+                                    isServiceRunning = isServiceRunning,
+                                    voiceState = voiceState,
+                                    partialTranscript = partialTranscript,
+                                    isOnline = isOnline,
+                                    settings = settings,
+                                    permissions = permissions,
+                                    isBusy = isBusy,
+                                    isStreaming = isStreaming,
+                                    streamingReply = streamingReply,
+                                    latestReport = latestReport,
+                                    conversations = conversations,
+                                    sessions = sessions,
+                                    activeSessionId = activeSessionId,
+                                    onStartAssistant = startVoiceAssistant,
+                                    onStopAssistant = stopVoiceAssistant,
+                                    onStopSpeaking = stopSpeakingOnly,
+                                    onInterruptVoice = interruptVoiceAssistant,
+                                    onEnableFloatingDot = {
+                                        if (settings.floatingAssistantEnabled) disableFloatingDot() else enableFloatingDot()
+                                    },
+                                    onOpenVoiceScreen = {
+                                        navController.navigate(UltraRoutes.VOICE) {
+                                            popUpTo(UltraRoutes.HOME) { saveState = true }
+                                            launchSingleTop = true
+                                            restoreState = true
+                                        }
+                                    },
+                                    onSubmitCommand = { cmd -> viewModel.submitCommand(cmd) },
+                                    onSpeakText = speakTextOutLoud,
+                                    onStartNewChat = viewModel::startNewConversation,
+                                    onSelectSession = viewModel::selectConversationSession,
+                                    onDeleteSession = viewModel::deleteConversationSession,
+                                    onFixPermission = fixMissingPermission
+                                )
+                            }
+                            composable(UltraRoutes.VOICE) {
+                                VoiceScreen(
+                                    isServiceRunning = isServiceRunning,
+                                    voiceState = voiceState,
+                                    voiceLevel = voiceLevel,
+                                    partialTranscript = partialTranscript,
+                                    lastRecognizedText = lastRecognizedText,
+                                    lastAgentReply = lastAgentReply,
+                                    streamingReply = streamingReply,
+                                    isOnline = isOnline,
+                                    settings = settings,
+                                    onStartVoice = startVoiceAssistant,
+                                    onStopVoice = stopVoiceAssistant,
+                                    onInterruptVoice = interruptVoiceAssistant,
+                                    onStopSpeaking = stopSpeakingOnly,
+                                    onEnableFloatingDot = enableFloatingDot,
+                                    onTestVoice = testVoicePreview,
+                                    onSelectVoiceGender = { gender ->
+                                        viewModel.updateVoiceGender(gender)
+                                        if (VoiceAssistantService.isRunning) {
+                                            runCatching {
+                                                context.startService(
+                                                    Intent(context, VoiceAssistantService::class.java)
+                                                        .setAction(VoiceAssistantService.ACTION_REFRESH_VOICE)
+                                                )
+                                            }
+                                        }
+                                    },
+                                    onSelectLanguage = viewModel::updateLanguage,
+                                    onUpdateWakePhrase = viewModel::updateWakePhrase,
+                                    onUpdateVoiceTuning = viewModel::updateVoiceTuning,
+                                    onUpdateVoiceVolume = viewModel::updateVoiceVolume,
+                                    onToggleContinuousListening = { cont ->
+                                        viewModel.updateAssistantBehavior(
+                                            settings.floatingAssistantEnabled,
+                                            cont,
+                                            settings.requireCallConfirmation
+                                        )
                                     }
-                                },
-                                icon = { Icon(tab.icon, contentDescription = tab.label) },
-                                label = { Text(tab.label, maxLines = 1) }
-                            )
+                                )
+                            }
+                            composable(UltraRoutes.CONTROL) {
+                                ToolsAndControlScreen(
+                                    tools = viewModel.registeredTools,
+                                    permissions = permissions,
+                                    screenSnapshot = screenSnapshot,
+                                    notifications = notifications,
+                                    smsCaps = viewModel.smsCapabilities(),
+                                    onRunToolTest = viewModel::runToolDirectly,
+                                    onInspectScreen = viewModel::inspectCurrentScreen,
+                                    onOpenAccessibilitySettings = { safeStartActivity(PermissionManager.accessibilitySettingsIntent()) },
+                                    onOpenNotificationSettings = { safeStartActivity(PermissionManager.notificationListenerSettingsIntent()) },
+                                    onClearNotifications = viewModel::clearNotifications,
+                                    onPrepareSmsDraft = viewModel::prepareSmsDraft
+                                )
+                            }
+                            composable(UltraRoutes.AUTOMATION) {
+                                AutomationScreen(
+                                    rules = automationRules,
+                                    pendingReminders = pendingReminders,
+                                    auditLogs = auditLogs,
+                                    onScheduleReminder = viewModel::scheduleReminder,
+                                    onCancelReminder = viewModel::cancelReminder,
+                                    onAddRule = viewModel::addAutomationRule,
+                                    onToggleRule = viewModel::toggleAutomationRule,
+                                    onDeleteRule = viewModel::deleteAutomationRule,
+                                    onClearAuditLogs = viewModel::clearAuditLogs
+                                )
+                            }
+                            composable(UltraRoutes.APPS) {
+                                AppManagerScreen(
+                                    apps = installedApps,
+                                    onLaunchApp = viewModel::launchApp,
+                                    onOpenAppInfo = viewModel::openAppInfo
+                                )
+                            }
+                            composable(UltraRoutes.SETTINGS) {
+                                SettingsScreen(
+                                    userEmail = userEmail,
+                                    isOnline = isOnline,
+                                    settings = settings,
+                                    permissions = permissions,
+                                    deviceInfo = viewModel.deviceInfo(),
+                                    deviceAdminExplanation = viewModel.deviceAdminExplanation(),
+                                    memories = memories,
+                                    sessions = sessions,
+                                    onUpdateOperatingMode = viewModel::updateOperatingMode,
+                                    onUpdateAiConfig = viewModel::updateAiConfig,
+                                    onUpdateVoiceGender = viewModel::updateVoiceGender,
+                                    onSelectLanguage = viewModel::updateLanguage,
+                                    onUpdateWakePhrase = viewModel::updateWakePhrase,
+                                    onUpdateVoiceTuning = viewModel::updateVoiceTuning,
+                                    onUpdateVoiceVolume = viewModel::updateVoiceVolume,
+                                    onTestVoice = testVoicePreview,
+                                    onUpdateAppearance = viewModel::updateAppearanceConfig,
+                                    onUpdateBehavior = { floating, continuous, callConfirm ->
+                                        viewModel.updateAssistantBehavior(floating, continuous, callConfirm)
+                                        if (floating) {
+                                            enableFloatingDot()
+                                        } else if (VoiceAssistantService.isRunning) {
+                                            runCatching {
+                                                context.startService(
+                                                    Intent(context, VoiceAssistantService::class.java)
+                                                        .setAction(VoiceAssistantService.ACTION_HIDE_DOT)
+                                                )
+                                            }
+                                        }
+                                    },
+                                    onLaunchFloatingDot = enableFloatingDot,
+                                    onUpdatePrivacyConfig = viewModel::updatePrivacyConfig,
+                                    onSaveMemory = viewModel::saveMemoryManual,
+                                    onDeleteMemory = viewModel::deleteMemory,
+                                    onClearAllMemories = viewModel::clearAllMemories,
+                                    onStartNewChat = viewModel::startNewConversation,
+                                    onClearConversationHistory = viewModel::clearConversationHistoryOnly,
+                                    onRequestContactsAndPhone = {
+                                        val missingCp = PermissionManager.missingContactsAndPhone(context)
+                                        if (missingCp.isNotEmpty()) {
+                                            contactsPhoneLauncher.launch(missingCp.toTypedArray())
+                                        } else {
+                                            safeStartActivity(PermissionManager.appDetailsIntent(context))
+                                        }
+                                    },
+                                    onOpenMicAppSettings = { safeStartActivity(PermissionManager.appDetailsIntent(context)) },
+                                    onOpenOverlaySettings = { safeStartActivity(PermissionManager.overlaySettingsIntent(context)) },
+                                    onOpenAccessibilitySettings = { safeStartActivity(PermissionManager.accessibilitySettingsIntent()) },
+                                    onOpenNotificationSettings = { safeStartActivity(PermissionManager.notificationListenerSettingsIntent()) },
+                                    onOpenBatterySettings = { safeStartActivity(PermissionManager.batteryOptimizationSettingsIntent()) },
+                                    onActivateDeviceAdmin = { safeStartActivity(PermissionManager.deviceAdminActivateIntent(context)) },
+                                    onOpenSecuritySettings = { safeStartActivity(PermissionManager.securitySettingsIntent()) },
+                                    onSignOut = {
+                                        if (VoiceAssistantService.isRunning) stopVoiceAssistant()
+                                        if (onOfflineExit != null) {
+                                            onOfflineExit()
+                                        } else {
+                                            signOut(credentialManager, scope)
+                                        }
+                                    }
+                                )
+                            }
                         }
                     }
                 }
             }
-        ) { innerPadding ->
-        Row(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-        ) {
-            if (useNavRail) {
-                NavigationRail {
-                    primaryTabs.forEach { tab ->
-                        NavigationRailItem(
-                            selected = currentRoute == tab.route,
-                            onClick = {
-                                navController.navigate(tab.route) {
-                                    popUpTo(UltraRoutes.HOME) { saveState = true }
-                                    launchSingleTop = true
-                                    restoreState = true
-                                }
-                            },
-                            icon = { Icon(tab.icon, contentDescription = tab.label) },
-                            label = { Text(tab.label) }
-                        )
-                    }
-                }
-            }
+        }
 
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.TopCenter
-            ) {
-                NavHost(
-                    navController = navController,
-                    startDestination = UltraRoutes.HOME
-                ) {
-                    composable(UltraRoutes.HOME) {
-                        HomeScreen(
-                            isServiceRunning = isServiceRunning,
-                            voiceState = voiceState,
-                            settings = settings,
-                            permissions = permissions,
-                            isBusy = isBusy,
-                            latestReport = latestReport,
-                            conversations = conversations,
-                            onStartAssistant = startVoiceAssistant,
-                            onStopAssistant = stopVoiceAssistant,
-                            onEnableFloatingDot = enableFloatingDot,
-                            onSubmitCommand = viewModel::submitCommand,
-                            onFixPermission = fixMissingPermission
-                        )
-                    }
-                    composable(UltraRoutes.VOICE) {
-                        VoiceScreen(
-                            isServiceRunning = isServiceRunning,
-                            voiceState = voiceState,
-                            voiceLevel = voiceLevel,
-                            partialTranscript = partialTranscript,
-                            lastRecognizedText = lastRecognizedText,
-                            lastAgentReply = lastAgentReply,
-                            settings = settings,
-                            onStartVoice = startVoiceAssistant,
-                            onStopVoice = stopVoiceAssistant,
-                            onInterruptVoice = interruptVoiceAssistant,
-                            onSelectLanguage = viewModel::updateLanguage,
-                            onUpdateWakePhrase = viewModel::updateWakePhrase,
-                            onUpdateVoiceTuning = viewModel::updateVoiceTuning
-                        )
-                    }
-                    composable(UltraRoutes.CONTROL) {
-                        ToolsAndControlScreen(
-                            tools = viewModel.registeredTools,
-                            permissions = permissions,
-                            screenSnapshot = screenSnapshot,
-                            notifications = notifications,
-                            smsCaps = viewModel.smsCapabilities(),
-                            onRunToolTest = viewModel::runToolDirectly,
-                            onInspectScreen = viewModel::inspectCurrentScreen,
-                            onOpenAccessibilitySettings = { safeStartActivity(PermissionManager.accessibilitySettingsIntent()) },
-                            onOpenNotificationSettings = { safeStartActivity(PermissionManager.notificationListenerSettingsIntent()) },
-                            onClearNotifications = viewModel::clearNotifications,
-                            onPrepareSmsDraft = viewModel::prepareSmsDraft
-                        )
-                    }
-                    composable(UltraRoutes.AUTOMATION) {
-                        AutomationScreen(
-                            rules = automationRules,
-                            pendingReminders = pendingReminders,
-                            auditLogs = auditLogs,
-                            onScheduleReminder = viewModel::scheduleReminder,
-                            onCancelReminder = viewModel::cancelReminder,
-                            onAddRule = viewModel::addAutomationRule,
-                            onToggleRule = viewModel::toggleAutomationRule,
-                            onDeleteRule = viewModel::deleteAutomationRule,
-                            onClearAuditLogs = viewModel::clearAuditLogs
-                        )
-                    }
-                    composable(UltraRoutes.APPS) {
-                        AppManagerScreen(
-                            apps = installedApps,
-                            onLaunchApp = viewModel::launchApp,
-                            onOpenAppInfo = viewModel::openAppInfo
-                        )
-                    }
-                    composable(UltraRoutes.SETTINGS) {
-                        SettingsScreen(
-                            userEmail = userEmail,
-                            settings = settings,
-                            permissions = permissions,
-                            deviceInfo = viewModel.deviceInfo(),
-                            deviceAdminExplanation = viewModel.deviceAdminExplanation(),
-                            memories = memories,
-                            onUpdateAiConfig = viewModel::updateAiConfig,
-                            onUpdatePrivacyConfig = viewModel::updatePrivacyConfig,
-                            onSaveMemory = viewModel::saveMemoryManual,
-                            onDeleteMemory = viewModel::deleteMemory,
-                            onClearAllMemories = viewModel::clearAllMemories,
-                            onOpenMicAppSettings = { safeStartActivity(PermissionManager.appDetailsIntent(context)) },
-                            onOpenOverlaySettings = { safeStartActivity(PermissionManager.overlaySettingsIntent(context)) },
-                            onOpenAccessibilitySettings = { safeStartActivity(PermissionManager.accessibilitySettingsIntent()) },
-                            onOpenNotificationSettings = { safeStartActivity(PermissionManager.notificationListenerSettingsIntent()) },
-                            onOpenBatterySettings = { safeStartActivity(PermissionManager.batteryOptimizationSettingsIntent()) },
-                            onActivateDeviceAdmin = { safeStartActivity(PermissionManager.deviceAdminActivateIntent(context)) },
-                            onOpenSecuritySettings = { safeStartActivity(PermissionManager.securitySettingsIntent()) },
-                            onSignOut = {
-                                if (VoiceAssistantService.isRunning) stopVoiceAssistant()
-                                if (onOfflineExit != null) {
-                                    onOfflineExit()
-                                } else {
-                                    signOut(credentialManager, scope)
-                                }
-                            }
-                        )
-                    }
-                }
-            }
-        }
-        }
+        // Subtle animated edge glow around perimeter while active
+        AmbientEdgeGlow(
+            isActive = isServiceRunning || isBusy || isStreaming,
+            voiceState = voiceState,
+            enabled = settings.ambientEdgeGlowEnabled
+        )
     }
 }

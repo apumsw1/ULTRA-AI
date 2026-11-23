@@ -69,7 +69,7 @@ fun ToolsAndControlScreen(
             horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            listOf("Tools (13)", "Screen", "Notify", "SMS").forEachIndexed { idx, label ->
+            listOf("Tools (${tools.size})", "Screen", "Notify", "SMS").forEachIndexed { idx, label ->
                 FilterChip(
                     selected = selectedSubTab == idx,
                     onClick = { selectedSubTab = idx },

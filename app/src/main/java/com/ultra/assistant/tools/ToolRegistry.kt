@@ -6,7 +6,9 @@ import com.ultra.assistant.automation.TaskScheduler
 import com.ultra.assistant.control.AppController
 import com.ultra.assistant.control.BrowserController
 import com.ultra.assistant.control.DeviceManagementController
+import com.ultra.assistant.control.MediaVolumeController
 import com.ultra.assistant.control.NotificationRepository
+import com.ultra.assistant.control.PhoneContactsController
 import com.ultra.assistant.control.ScreenController
 import com.ultra.assistant.control.SmsController
 import com.ultra.assistant.data.LocalSettingsRepository
@@ -27,11 +29,19 @@ class ToolRegistry(
     private val smsController = SmsController(appContext)
     private val browserController = BrowserController(appContext)
     private val deviceController = DeviceManagementController(appContext)
+    private val mediaVolumeController = MediaVolumeController(appContext)
+    private val phoneContactsController = PhoneContactsController(appContext)
     private val taskScheduler = TaskScheduler(appContext)
     private val ruleManager = RuleManager(appContext)
 
     private val tools: Map<String, UltraTool> = listOf(
         OpenAppTool(),
+        SearchYouTubeTool(),
+        ControlMediaVolumeTool(),
+        ToggleFlashlightTool(),
+        OpenDeviceSettingsTool(),
+        MakePhoneCallTool(),
+        NavigateSystemTool(),
         GetAccessibleScreenTool(),
         ClickUiElementTool(),
         TypeTextTool(),
@@ -84,12 +94,176 @@ class ToolRegistry(
             val result = appController.launchApp(query)
             return result.fold(
                 onSuccess = { app ->
-                    ToolExecutionResult(id, true, "Launched ${app.label} (${app.packageName}).", app.packageName)
+                    ToolExecutionResult(id, true, "Launched ${app.label}.", app.packageName)
                 },
                 onFailure = { err ->
                     ToolExecutionResult(id, false, err.message ?: "Could not open '$query'.")
                 }
             )
+        }
+    }
+
+    private inner class SearchYouTubeTool : UltraTool {
+        override val id = "search_youtube"
+        override val title = "Search YouTube"
+        override val description = "Search YouTube videos or channels in the YouTube app or browser."
+        override val parameters = listOf(
+            ToolParamSpec("query", "string", "Topic, video title, or creator to search on YouTube", required = true)
+        )
+        override val requiredPermissions = emptyList<PermissionRequirement>()
+        override val riskLevel = RiskLevel.LOW
+
+        override suspend fun execute(args: Map<String, String>): ToolExecutionResult {
+            val query = args["query"].orEmpty().trim()
+            return browserController.searchYouTube(query).fold(
+                onSuccess = { url -> ToolExecutionResult(id, true, "Searching YouTube for '$query'.", url) },
+                onFailure = { err -> ToolExecutionResult(id, false, err.message ?: "Could not open YouTube search.") }
+            )
+        }
+    }
+
+    private inner class ControlMediaVolumeTool : UltraTool {
+        override val id = "control_media_volume"
+        override val title = "Media & Volume Control"
+        override val description = "Adjust device media volume ('up','down','mute','unmute','set') or control media playback ('play','pause','play_pause','next','previous','stop')."
+        override val parameters = listOf(
+            ToolParamSpec("volumeAction", "string", "Optional: up, down, mute, unmute, set", required = false),
+            ToolParamSpec("levelPercent", "integer", "Optional 0-100 when volumeAction='set'", required = false),
+            ToolParamSpec("mediaAction", "string", "Optional: play, pause, play_pause, next, previous, stop", required = false)
+        )
+        override val requiredPermissions = emptyList<PermissionRequirement>()
+        override val riskLevel = RiskLevel.LOW
+
+        override fun validateArgs(args: Map<String, String>): String? {
+            if (args["volumeAction"].isNullOrBlank() && args["mediaAction"].isNullOrBlank()) {
+                return "Provide 'volumeAction' or 'mediaAction'."
+            }
+            val pctRaw = args["levelPercent"]
+            if (!pctRaw.isNullOrBlank() && pctRaw.toIntOrNull() == null) {
+                return "Parameter 'levelPercent' must be an integer."
+            }
+            return null
+        }
+
+        override suspend fun execute(args: Map<String, String>): ToolExecutionResult {
+            val mediaAct = args["mediaAction"].orEmpty().trim()
+            val volAct = args["volumeAction"].orEmpty().trim()
+            val pct = args["levelPercent"]?.toIntOrNull()
+            val res = if (mediaAct.isNotBlank()) {
+                mediaVolumeController.controlMediaPlayback(mediaAct)
+            } else {
+                mediaVolumeController.adjustVolume(volAct, pct)
+            }
+            return res.fold(
+                onSuccess = { msg -> ToolExecutionResult(id, true, msg) },
+                onFailure = { err -> ToolExecutionResult(id, false, err.message ?: "Audio control failed.") }
+            )
+        }
+    }
+
+    private inner class ToggleFlashlightTool : UltraTool {
+        override val id = "toggle_flashlight"
+        override val title = "Flashlight Control"
+        override val description = "Turn the device camera flashlight on, off, or toggle it."
+        override val parameters = listOf(
+            ToolParamSpec("state", "string", "Optional: 'on', 'off', or 'toggle'", required = false)
+        )
+        override val requiredPermissions = emptyList<PermissionRequirement>()
+        override val riskLevel = RiskLevel.LOW
+
+        override suspend fun execute(args: Map<String, String>): ToolExecutionResult {
+            val enable = when (args["state"]?.trim()?.lowercase()) {
+                "on", "true", "enable" -> true
+                "off", "false", "disable" -> false
+                else -> null
+            }
+            return mediaVolumeController.setFlashlight(enable).fold(
+                onSuccess = { msg -> ToolExecutionResult(id, true, msg) },
+                onFailure = { err -> ToolExecutionResult(id, false, err.message ?: "Flashlight unavailable.") }
+            )
+        }
+    }
+
+    private inner class OpenDeviceSettingsTool : UltraTool {
+        override val id = "open_device_settings"
+        override val title = "Open System Settings"
+        override val description = "Open permitted Android settings or system panels (wifi, bluetooth, network, sound, brightness, notifications, battery, main)."
+        override val parameters = listOf(
+            ToolParamSpec("target", "string", "Settings section: wifi, bluetooth, network, sound, brightness, notifications, battery, main", required = true)
+        )
+        override val requiredPermissions = emptyList<PermissionRequirement>()
+        override val riskLevel = RiskLevel.LOW
+
+        override suspend fun execute(args: Map<String, String>): ToolExecutionResult {
+            val target = args["target"].orEmpty().trim().ifBlank { "main" }
+            return appController.openDeviceSettings(target).fold(
+                onSuccess = { msg -> ToolExecutionResult(id, true, msg) },
+                onFailure = { err -> ToolExecutionResult(id, false, err.message ?: "Unable to open settings.") }
+            )
+        }
+    }
+
+    private inner class MakePhoneCallTool : UltraTool {
+        override val id = "make_phone_call"
+        override val title = "Phone Call / Dialer"
+        override val description = "Look up a contact or phone number and open the phone dialer or place a call after user confirmation."
+        override val parameters = listOf(
+            ToolParamSpec("target", "string", "Contact name or phone number", required = true),
+            ToolParamSpec("directCall", "boolean", "If true and CALL_PHONE permission granted, dial directly after confirmation", required = false)
+        )
+        override val requiredPermissions = emptyList<PermissionRequirement>()
+        override val riskLevel = RiskLevel.HIGH
+
+        override suspend fun execute(args: Map<String, String>): ToolExecutionResult {
+            val target = args["target"].orEmpty().trim()
+            val direct = args["directCall"]?.equals("true", ignoreCase = true) == true
+            val matchRes = phoneContactsController.findContactNumber(target)
+            if (matchRes.isFailure) {
+                val err = matchRes.exceptionOrNull()
+                if (!PermissionManager.hasContacts(appContext) && target.any { it.isLetter() }) {
+                    return ToolExecutionResult(
+                        id,
+                        false,
+                        "Contacts permission is needed to look up '$target'. Grant Contacts permission or provide a phone number.",
+                        missingPermission = PermissionRequirement.READ_CONTACTS
+                    )
+                }
+                return ToolExecutionResult(id, false, err?.message ?: "Could not find phone number for '$target'.")
+            }
+            val match = matchRes.getOrThrow()
+            val callRes = if (direct) {
+                phoneContactsController.placeCallIfPermitted(match.phoneNumber)
+            } else {
+                phoneContactsController.openDialer(match.phoneNumber)
+            }
+            return callRes.fold(
+                onSuccess = { msg -> ToolExecutionResult(id, true, msg, "${match.displayName}: ${match.phoneNumber}") },
+                onFailure = { err -> ToolExecutionResult(id, false, err.message ?: "Unable to open dialer.") }
+            )
+        }
+    }
+
+    private inner class NavigateSystemTool : UltraTool {
+        override val id = "navigate_system"
+        override val title = "System Navigation"
+        override val description = "Perform global Android navigation: 'home', 'recents', 'notifications', or 'back'."
+        override val parameters = listOf(
+            ToolParamSpec("action", "string", "'home', 'recents', 'notifications', or 'back'", required = true)
+        )
+        override val requiredPermissions = listOf(PermissionRequirement.ACCESSIBILITY)
+        override val riskLevel = RiskLevel.LOW
+
+        override suspend fun execute(args: Map<String, String>): ToolExecutionResult {
+            if (!PermissionManager.isAccessibilityEnabled(appContext)) {
+                return ToolExecutionResult(
+                    id,
+                    false,
+                    "Accessibility Service is required for system navigation.",
+                    missingPermission = PermissionRequirement.ACCESSIBILITY
+                )
+            }
+            val res = screenController.navigateSystem(args["action"].orEmpty().ifBlank { "home" })
+            return ToolExecutionResult(id, res.success, res.message)
         }
     }
 
@@ -243,12 +417,12 @@ class ToolRegistry(
             val limit = (args["limit"]?.toIntOrNull() ?: 6).coerceIn(1, 20)
             val list = NotificationRepository.notificationsFlow.value.take(limit)
             if (list.isEmpty()) {
-                return ToolExecutionResult(id, true, "No active notifications captured yet.")
+                return ToolExecutionResult(id, true, "No new notifications right now.")
             }
             val summary = list.joinToString("\n") { n ->
                 "[${n.category.name}] ${n.title}: ${n.text}${if (n.sensitiveRedacted) " (redacted)" else ""}"
             }
-            return ToolExecutionResult(id, true, "Found ${list.size} notification(s).", summary)
+            return ToolExecutionResult(id, true, "You have ${list.size} recent notification(s).", summary)
         }
     }
 
@@ -265,16 +439,21 @@ class ToolRegistry(
         override val riskLevel = RiskLevel.HIGH
 
         override suspend fun execute(args: Map<String, String>): ToolExecutionResult {
-            val recipient = args["recipient"].orEmpty().trim()
+            val recipientInput = args["recipient"].orEmpty().trim()
+            val resolvedRecipient = if (recipientInput.isNotBlank() && recipientInput.any { it.isLetter() }) {
+                phoneContactsController.findContactNumber(recipientInput).getOrNull()?.phoneNumber ?: recipientInput
+            } else {
+                recipientInput
+            }
             val message = args["message"].orEmpty().trim()
             val directSend = args["directSend"]?.equals("true", ignoreCase = true) == true
             val settings = settingsRepository.settingsFlow.first()
 
             val result = if (directSend && settings.directSmsEnabled && PermissionManager.isDefaultSmsApp(appContext)) {
-                val direct = smsController.sendDirectIfAuthorized(recipient, message)
-                if (direct.success) direct else smsController.prepareDraftIntent(recipient, message)
+                val direct = smsController.sendDirectIfAuthorized(resolvedRecipient, message)
+                if (direct.success) direct else smsController.prepareDraftIntent(resolvedRecipient, message)
             } else {
-                smsController.prepareDraftIntent(recipient, message)
+                smsController.prepareDraftIntent(resolvedRecipient, message)
             }
             return ToolExecutionResult(
                 toolId = id,
@@ -307,10 +486,10 @@ class ToolRegistry(
     private inner class SearchWebTool : UltraTool {
         override val id = "search_web"
         override val title = "Search Web"
-        override val description = "Search Google or YouTube Music in the browser."
+        override val description = "Search Google, YouTube, or YouTube Music."
         override val parameters = listOf(
             ToolParamSpec("query", "string", "Search query", required = true),
-            ToolParamSpec("platform", "string", "'google' or 'youtube_music'", required = false)
+            ToolParamSpec("platform", "string", "'google', 'youtube', or 'youtube_music'", required = false)
         )
         override val requiredPermissions = emptyList<PermissionRequirement>()
         override val riskLevel = RiskLevel.LOW
@@ -318,10 +497,10 @@ class ToolRegistry(
         override suspend fun execute(args: Map<String, String>): ToolExecutionResult {
             val query = args["query"].orEmpty()
             val platform = args["platform"].orEmpty().lowercase()
-            val res = if (platform == "youtube_music" || platform == "music") {
-                browserController.searchYouTubeMusic(query)
-            } else {
-                browserController.searchWeb(query)
+            val res = when (platform) {
+                "youtube_music", "music" -> browserController.searchYouTubeMusic(query)
+                "youtube" -> browserController.searchYouTube(query)
+                else -> browserController.searchWeb(query)
             }
             return res.fold(
                 onSuccess = { url -> ToolExecutionResult(id, true, "Searching for '$query'.", url) },
@@ -333,7 +512,7 @@ class ToolRegistry(
     private inner class GetDeviceInformationTool : UltraTool {
         override val id = "get_device_information"
         override val title = "Get Device Information"
-        override val description = "Retrieve device model, Android version, permission status, and optional screen lock check."
+        override val description = "Retrieve device model, Android version, battery level, permission status, and optional screen lock."
         override val parameters = listOf(
             ToolParamSpec("action", "string", "Optional 'info' or 'lock_screen'", required = false)
         )
@@ -357,11 +536,12 @@ class ToolRegistry(
                 )
             }
             val info = deviceController.getDeviceInfo()
+            val battery = mediaVolumeController.batterySummary()
             val perms = PermissionManager.snapshot(appContext)
             val summary = "${info.manufacturer} ${info.model} (Android ${info.androidVersion}, API ${info.sdkInt}) | " +
-                "Mic=${perms.microphoneGranted}, Accessibility=${perms.accessibilityEnabled}, " +
-                "NotifListener=${perms.notificationListenerEnabled}, Admin=${perms.deviceAdminActive}"
-            return ToolExecutionResult(id, true, "Device diagnostics collected.", summary)
+                "Battery: $battery | Mic=${perms.microphoneGranted}, Accessibility=${perms.accessibilityEnabled}, " +
+                "NotifListener=${perms.notificationListenerEnabled}, Contacts=${perms.contactsGranted}, Call=${perms.callPhoneGranted}"
+            return ToolExecutionResult(id, true, "Battery is $battery on ${info.manufacturer} ${info.model}.", summary)
         }
     }
 

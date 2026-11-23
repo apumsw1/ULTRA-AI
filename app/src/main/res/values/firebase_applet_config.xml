@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8" standalone="no"?>
 <resources>
-    <string name="firestore_database_id" translatable="false">ai-studio-android-repobuil-9bd59705-f18c-4e20-8b03-3855b40d439c</string>
+    <string name="firestore_database_id" translatable="false">ai-studio-android-ultraai-b253ec87-ac24-4394-97fc-01f9214ca74f</string>
     <string name="recaptcha_site_key" translatable="false">6LeMHikuAAAAAPVuWxxJ6IYSsqGFxvLvZsl0jIgx</string>
 </resources>

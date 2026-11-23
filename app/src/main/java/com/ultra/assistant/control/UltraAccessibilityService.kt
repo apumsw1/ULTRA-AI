@@ -179,6 +179,21 @@ class UltraAccessibilityService : AccessibilityService() {
         }
     }
 
+    fun performSystemNavigation(target: String): AccessibilityActionResult {
+        val action = when (target.lowercase()) {
+            "home" -> GLOBAL_ACTION_HOME
+            "recents", "recent", "apps", "overview" -> GLOBAL_ACTION_RECENTS
+            "notifications", "notification_shade" -> GLOBAL_ACTION_NOTIFICATIONS
+            else -> GLOBAL_ACTION_BACK
+        }
+        val ok = performGlobalAction(action)
+        return if (ok) {
+            AccessibilityActionResult(true, "Performed system navigation: ${target.lowercase()}.")
+        } else {
+            AccessibilityActionResult(false, "System navigation '${target.lowercase()}' failed.")
+        }
+    }
+
     fun performTap(x: Float, y: Float): Boolean {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return false
         val path = Path().apply { moveTo(x, y) }

@@ -60,4 +60,10 @@ class ScreenController(private val context: Context) {
             ?: return AccessibilityActionResult(false, "Accessibility Service is disabled. Please enable it in Settings.")
         return service.navigateBack()
     }
+
+    fun navigateSystem(target: String): AccessibilityActionResult {
+        val service = UltraAccessibilityService.getInstance()
+            ?: return AccessibilityActionResult(false, "Accessibility Service is disabled. Please enable it in Settings.")
+        return service.performSystemNavigation(target)
+    }
 }

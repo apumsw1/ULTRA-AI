@@ -291,9 +291,15 @@ class ContinuousAudioCaptureEngine(
     }
 
     private fun runCaptureLoop(record: AudioRecord) {
-        val frameShorts = ShortArray(VoiceAudioMath.FRAME_SAMPLES)
-        val frameBytes = ByteArray(VoiceAudioMath.FRAME_SAMPLES * 2)
-        val preRollFrames = ArrayDeque<ByteArray>(24)
+        // 40ms frames halve wakeups (25Hz vs 50Hz) while keeping VoiceAudioMath.FRAME_SAMPLES (320) intact
+        val captureSamples = VoiceAudioMath.FRAME_SAMPLES * 2 // 640 shorts = 40ms at 16kHz
+        val captureBytes = captureSamples * 2
+        val preRollSlotCount = 10 // ~400ms pre-roll
+        val preRollRing = Array(preRollSlotCount) { ByteArray(captureBytes) }
+        var preRollHead = 0
+        var preRollFilled = 0
+
+        val frameShorts = ShortArray(captureSamples)
         val utteranceStream = ByteArrayOutputStream(32_000)
 
         var noiseFloorRms = 180f
@@ -302,37 +308,38 @@ class ContinuousAudioCaptureEngine(
         var speechActive = false
         var activeSpeechFramesTotal = 0
         var lastLevelDispatchMs = 0L
+        var lastEmittedLevel = -1f
 
         try {
             while (engineScope.isActive && !paused && audioRecord === record) {
                 val read = record.read(frameShorts, 0, frameShorts.size)
                 if (read <= 0) continue
 
-                ByteBuffer.wrap(frameBytes, 0, read * 2)
-                    .order(ByteOrder.LITTLE_ENDIAN)
-                    .asShortBuffer()
-                    .put(frameShorts, 0, read)
-                val currentFrameCopy = frameBytes.copyOf(read * 2)
-
                 val rms = VoiceAudioMath.computeRms(frameShorts, read)
                 val dbfs = VoiceAudioMath.computeDbfs(rms)
                 val visualLevel = VoiceAudioMath.rmsToVisualLevel(rms)
                 val clipped = VoiceAudioMath.detectClipping(frameShorts, read)
                 val now = System.currentTimeMillis()
-                val levelInterval = if (batteryConsciousMode && !speechActive) 90L else 50L
-                if (now - lastLevelDispatchMs >= levelInterval) {
+                val levelInterval = if (speechActive) 80L else 160L
+                val significantChange = abs(visualLevel - lastEmittedLevel) >= 0.25f || visualLevel > 0.3f
+                if (now - lastLevelDispatchMs >= levelInterval && (significantChange || lastEmittedLevel > 0.05f)) {
                     lastLevelDispatchMs = now
-                    onAudioLevel(visualLevel, dbfs, clipped)
+                    val dispatchedLevel = if (visualLevel < 0.15f) 0f else visualLevel
+                    lastEmittedLevel = dispatchedLevel
+                    onAudioLevel(dispatchedLevel, dbfs, clipped)
                     if (clipped != latestStatus.clippingDetected) {
                         latestStatus = latestStatus.copy(clippingDetected = clipped)
                         onHardwareStatus(latestStatus)
                     }
                 }
 
-                // Keep pre-roll in RAM even before onset so first syllable is never clipped
+                // Write PCM16 LE into reusable circular slot while idle — zero per-frame ByteBuffer/copy allocations
+                val byteLen = read * 2
                 if (!speechActive) {
-                    if (preRollFrames.size >= 20) preRollFrames.removeFirst()
-                    preRollFrames.addLast(currentFrameCopy)
+                    val slot = preRollRing[preRollHead]
+                    writeShortsToLeBytes(frameShorts, read, slot)
+                    preRollHead = (preRollHead + 1) % preRollSlotCount
+                    if (preRollFilled < preRollSlotCount) preRollFilled++
                 }
 
                 val threshold = VoiceAudioMath.computeAdaptiveThreshold(
@@ -344,18 +351,25 @@ class ContinuousAudioCaptureEngine(
 
                 if (!speechActive) {
                     if (!isHotFrame) {
-                        noiseFloorRms = (noiseFloorRms * 0.94f) + (rms * 0.06f)
+                        noiseFloorRms = (noiseFloorRms * 0.92f) + (rms * 0.08f)
                         consecutiveSpeechFrames = 0
                     } else {
                         consecutiveSpeechFrames++
-                        val requiredOnsetFrames = if (assistantSpeaking) 5 else 3
+                        val requiredOnsetFrames = if (assistantSpeaking) 3 else 2
                         if (consecutiveSpeechFrames >= requiredOnsetFrames) {
                             speechActive = true
                             consecutiveSilenceFrames = 0
                             activeSpeechFramesTotal = consecutiveSpeechFrames
                             utteranceStream.reset()
-                            preRollFrames.forEach { utteranceStream.write(it) }
-                            preRollFrames.clear()
+
+                            // Flush circular pre-roll frames in chronological order
+                            val oldestIdx = if (preRollFilled < preRollSlotCount) 0 else preRollHead
+                            for (idx in 0 until preRollFilled) {
+                                val slotIdx = (oldestIdx + idx) % preRollSlotCount
+                                utteranceStream.write(preRollRing[slotIdx], 0, captureBytes)
+                            }
+                            preRollHead = 0
+                            preRollFilled = 0
 
                             if (assistantSpeaking) {
                                 onBargeInDetected()
@@ -365,7 +379,9 @@ class ContinuousAudioCaptureEngine(
                         }
                     }
                 } else {
-                    utteranceStream.write(currentFrameCopy)
+                    val scratch = preRollRing[0]
+                    writeShortsToLeBytes(frameShorts, read, scratch)
+                    utteranceStream.write(scratch, 0, byteLen)
                     if (isHotFrame) {
                         consecutiveSilenceFrames = 0
                         activeSpeechFramesTotal++
@@ -373,7 +389,7 @@ class ContinuousAudioCaptureEngine(
                         consecutiveSilenceFrames++
                     }
 
-                    val silenceCutoffFrames = 36 // ~720ms post-speech pause
+                    val silenceCutoffFrames = 18 // 18 * 40ms = ~720ms post-speech pause
                     val maxUtteranceBytes = VoiceAudioMath.SAMPLE_RATE * 2 * 18 // 18s RAM cap
                     if (consecutiveSilenceFrames >= silenceCutoffFrames ||
                         utteranceStream.size() >= maxUtteranceBytes
@@ -384,8 +400,8 @@ class ContinuousAudioCaptureEngine(
                         consecutiveSpeechFrames = 0
                         consecutiveSilenceFrames = 0
 
-                        // Require >= 240ms of actual speech to avoid coughing/click false triggers
-                        if (activeSpeechFramesTotal >= 7 && pcmBytes.size >= 8000) {
+                        // Require >= 160ms of actual speech + >= 8KB audio
+                        if (activeSpeechFramesTotal >= 4 && pcmBytes.size >= 8000) {
                             val wav = VoiceAudioMath.pcm16ToWavBytes(pcmBytes)
                             onUtteranceReady(wav)
                         }
@@ -397,7 +413,15 @@ class ContinuousAudioCaptureEngine(
             // Exits cleanly when stopped or released
         } finally {
             utteranceStream.reset()
-            preRollFrames.clear()
+        }
+    }
+
+    private fun writeShortsToLeBytes(shorts: ShortArray, count: Int, out: ByteArray) {
+        var j = 0
+        for (i in 0 until count) {
+            val s = shorts[i].toInt()
+            out[j++] = (s and 0xFF).toByte()
+            out[j++] = ((s ushr 8) and 0xFF).toByte()
         }
     }
 

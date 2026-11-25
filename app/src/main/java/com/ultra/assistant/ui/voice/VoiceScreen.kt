@@ -53,7 +53,9 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.ultra.assistant.R
+import com.ultra.assistant.VoiceAssistantService
 import com.ultra.assistant.data.AiOperatingMode
 import com.ultra.assistant.data.UltraSettings
 import com.ultra.assistant.data.VoiceGender
@@ -98,6 +100,8 @@ fun VoiceScreen(
     var speed by remember(settings.voiceSpeed) { mutableFloatStateOf(settings.voiceSpeed) }
     var pitch by remember(settings.voicePitch) { mutableFloatStateOf(settings.voicePitch) }
     var volume by remember(settings.voiceVolume) { mutableFloatStateOf(settings.voiceVolume) }
+    val liveStreamVoiceLevel by VoiceAssistantService.voiceLevelFlow.collectAsStateWithLifecycle()
+    val effectiveVoiceLevel = maxOf(voiceLevel, liveStreamVoiceLevel)
 
     val effectiveOffline = settings.operatingMode == AiOperatingMode.OFFLINE || !isOnline
     val speaking = voiceState.equals("SPEAKING", true)
@@ -168,7 +172,7 @@ fun VoiceScreen(
                 ) {
                     VoiceOrbCanvas(
                         voiceState = voiceState,
-                        voiceLevel = voiceLevel,
+                        voiceLevel = effectiveVoiceLevel,
                         isServiceActive = activeVoice,
                         modifier = Modifier
                             .size(205.dp)
@@ -192,7 +196,7 @@ fun VoiceScreen(
                             modifier = Modifier.size(18.dp)
                         )
                         LinearProgressIndicator(
-                            progress = { (voiceLevel / 12f).coerceIn(0f, 1f) },
+                            progress = { (effectiveVoiceLevel / 12f).coerceIn(0f, 1f) },
                             color = stateColor,
                             modifier = Modifier
                                 .weight(1f)

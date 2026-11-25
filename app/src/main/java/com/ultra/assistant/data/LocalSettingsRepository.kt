@@ -52,7 +52,7 @@ enum class UltraThemeStyle(val label: String) {
 
 data class UltraSettings(
     val userDisplayName: String = "",
-    val language: String = "English",
+    val language: String = "Auto",
     val languageAutoDetect: Boolean = true,
     val wakePhrase: String = "Hey Ultra",
     val voiceGender: VoiceGender = VoiceGender.FEMALE,
@@ -96,7 +96,7 @@ class LocalSettingsRepository(context: Context) {
         prefs.edit().putString("user_display_name", name.trim().take(60)).apply()
     }
 
-    fun language(): String = prefs.getString("language", "English") ?: "English"
+    fun language(): String = prefs.getString("language", "Auto") ?: "Auto"
 
     fun setLanguage(v: String) {
         prefs.edit().putString("language", v).apply()

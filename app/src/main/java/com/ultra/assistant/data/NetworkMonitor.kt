@@ -75,10 +75,20 @@ class NetworkMonitor(context: Context) {
     private fun computeConnectivity(lostNetwork: Network? = null): Boolean {
         val cm = connectivityManager ?: return false
         return runCatching {
-            val active = cm.activeNetwork ?: return false
-            if (lostNetwork != null && active == lostNetwork) return false
-            val caps = cm.getNetworkCapabilities(active) ?: return false
-            hasInternetCaps(caps)
+            val active = cm.activeNetwork
+            if (active != null && active != lostNetwork) {
+                val activeCaps = cm.getNetworkCapabilities(active)
+                if (activeCaps != null && hasInternetCaps(activeCaps)) {
+                    return@runCatching true
+                }
+            }
+            @Suppress("DEPRECATION")
+            val networks = cm.allNetworks
+            networks.any { net ->
+                if (lostNetwork != null && net == lostNetwork) return@any false
+                val caps = cm.getNetworkCapabilities(net) ?: return@any false
+                hasInternetCaps(caps)
+            }
         }.getOrDefault(false)
     }
 
@@ -87,6 +97,7 @@ class NetworkMonitor(context: Context) {
             (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) ||
                 caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
                 caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) ||
-                caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET))
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) ||
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN))
     }
 }

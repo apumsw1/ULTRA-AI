@@ -253,4 +253,21 @@ class UltraCoreUnitTest {
         assertEquals(IntentCategory.SCREEN_INSPECT, intentEngine.classify("Read screen aloud").category)
         assertEquals(IntentCategory.SCREEN_ACTION, intentEngine.classify("Swipe left").category)
     }
+
+    @Test
+    fun `neural tts selects warm voices and fallback pitch stays natural without formant warping`() {
+        assertEquals("gemini-3.1-flash-tts-preview", com.ultra.assistant.brain.ModelRouter.GEMINI_TTS_MODEL)
+        assertEquals("Sulafat", com.ultra.assistant.brain.ModelRouter.selectGeminiTtsVoiceName(com.ultra.assistant.data.VoiceGender.FEMALE))
+        assertEquals("Puck", com.ultra.assistant.brain.ModelRouter.selectGeminiTtsVoiceName(com.ultra.assistant.data.VoiceGender.MALE))
+
+        assertEquals(1.0f, com.ultra.assistant.voice.VoiceAudioController.normalizeFallbackPitch(1.0f), 0.001f)
+        assertEquals(0.85f, com.ultra.assistant.voice.VoiceAudioController.normalizeFallbackPitch(0.5f), 0.001f)
+        assertEquals(1.2f, com.ultra.assistant.voice.VoiceAudioController.normalizeFallbackPitch(1.5f), 0.001f)
+    }
+
+    @Test
+    fun `accessibility service throttles passive window snapshots to prevent scroll lag`() {
+        assertFalse(com.ultra.assistant.control.UltraAccessibilityService.shouldRefreshPassiveSnapshot(1000L, 1500L))
+        assertTrue(com.ultra.assistant.control.UltraAccessibilityService.shouldRefreshPassiveSnapshot(1000L, 2200L))
+    }
 }

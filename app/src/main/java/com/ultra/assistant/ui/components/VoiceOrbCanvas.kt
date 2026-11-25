@@ -30,25 +30,35 @@ fun VoiceOrbCanvas(
     isServiceActive: Boolean,
     modifier: Modifier = Modifier.size(180.dp)
 ) {
-    val transition = rememberInfiniteTransition(label = "orb")
-    val angle by transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 360f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 6000, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "orbAngle"
-    )
-    val pulse by transition.animateFloat(
-        initialValue = 0.92f,
-        targetValue = 1.08f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1200),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "orbPulse"
-    )
+    val shouldAnimate = isServiceActive && voiceState.uppercase() !in setOf("IDLE", "STOPPED")
+    val angle: Float
+    val pulse: Float
+    if (shouldAnimate) {
+        val transition = rememberInfiniteTransition(label = "orb")
+        val animAngle by transition.animateFloat(
+            initialValue = 0f,
+            targetValue = 360f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 6000, easing = LinearEasing),
+                repeatMode = RepeatMode.Restart
+            ),
+            label = "orbAngle"
+        )
+        val animPulse by transition.animateFloat(
+            initialValue = 0.94f,
+            targetValue = 1.06f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 1200),
+                repeatMode = RepeatMode.Reverse
+            ),
+            label = "orbPulse"
+        )
+        angle = animAngle
+        pulse = animPulse
+    } else {
+        angle = 0f
+        pulse = 1f
+    }
 
     val (primary, secondary) = when {
         !isServiceActive || voiceState in setOf("IDLE", "STOPPED") -> Color(0xFF4B5C73) to Color(0xFF283445)

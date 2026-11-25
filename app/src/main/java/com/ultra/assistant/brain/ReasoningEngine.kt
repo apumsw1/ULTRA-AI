@@ -32,7 +32,9 @@ class ReasoningEngine(
         intent: IntentAnalysis,
         history: List<Pair<String, String>>,
         memorySummary: String,
-        toolCatalogJson: String
+        toolCatalogJson: String,
+        skipRemoteAi: Boolean = false,
+        priorOnlineError: String? = null
     ): Pair<String, ReasoningDecision> {
         val settings = settingsRepository.settingsFlow.first()
         val isCompound = IntentEngine.isCompoundAction(userInput)
@@ -51,6 +53,12 @@ class ReasoningEngine(
             return offlineEngine.respond(userInput, intent, offlineCompound)
         }
 
+        // If streaming online AI already failed for this exact turn, fail over directly without waiting another 25-45s
+        if (skipRemoteAi) {
+            val errDetail = priorOnlineError?.ifBlank { "Online AI error" } ?: "Online AI unavailable"
+            return buildOnlineFailureDecision(userInput, intent, isCompound, settings.operatingMode, errDetail)
+        }
+
         val screenContext = if (screenController.isReady()) {
             screenController.describeScreenConcise().getOrElse { "Unavailable" }
         } else {
@@ -67,32 +75,57 @@ class ReasoningEngine(
         )
 
         return aiResult.getOrElse { err ->
-            // If online planner fails, fall back cleanly to local compound or offline engine without double waiting
-            val localFallback = localFastPath(userInput, intent) ?: if (isCompound) buildOfflineCompoundDecision(userInput) else null
-            if (localFallback != null) {
-                return "Offline Fallback • Local Agent" to localFallback
-            }
-            val offlineFallback = offlineEngine.respond(userInput, intent, null)
             val errDetail = err.localizedMessage ?: "connection error"
-            if (settings.operatingMode == AiOperatingMode.ONLINE) {
-                val errReply = when (intent.detectedLanguage) {
-                    "bn" -> "অনলাইন AI-এর সাথে সংযোগ করা যায়নি ($errDetail)। ইন্টারনেট বা Settings > AI Gateway পরীক্ষা করুন।"
-                    "hi" -> "ऑनलाइन AI से जुड़ने में समस्या हुई ($errDetail)।"
-                    else -> "Online AI could not be reached ($errDetail). Check internet or Settings > AI Gateway."
-                }
-                "Online Error • $errDetail" to ReasoningDecision(
-                    thoughtSummary = "Online AI failed: ${err.message}",
-                    directReply = errReply,
-                    plannedTools = emptyList()
-                )
-            } else {
-                "Offline Fallback • Local Assistant" to ReasoningDecision(
-                    thoughtSummary = "Auto fallback to Offline Engine after online error: $errDetail",
-                    directReply = offlineFallback.second.directReply,
-                    plannedTools = offlineFallback.second.plannedTools
-                )
+            buildOnlineFailureDecision(userInput, intent, isCompound, settings.operatingMode, errDetail)
+        }
+    }
+
+    private suspend fun buildOnlineFailureDecision(
+        userInput: String,
+        intent: IntentAnalysis,
+        isCompound: Boolean,
+        operatingMode: AiOperatingMode,
+        errDetail: String
+    ): Pair<String, ReasoningDecision> {
+        val localFallback = localFastPath(userInput, intent) ?: if (isCompound) buildOfflineCompoundDecision(userInput) else null
+        if (localFallback != null) {
+            return "Local Agent Fallback" to localFallback
+        }
+        val offlineFallback = offlineEngine.respond(userInput, intent, null)
+        if (operatingMode == AiOperatingMode.ONLINE) {
+            val errReply = when (intent.detectedLanguage) {
+                "bn" -> "অনলাইন AI-এর সাথে সংযোগ করা যায়নি ($errDetail)। ইন্টারনেট বা Settings > AI Gateway পরীক্ষা করুন।"
+                "hi" -> "ऑनलाइन AI से जुड़ने में समस्या हुई ($errDetail)।"
+                else -> "Online AI could not be reached ($errDetail). Check internet or Settings > AI Gateway."
+            }
+            return "Online Error • $errDetail" to ReasoningDecision(
+                thoughtSummary = "Online AI failed: $errDetail",
+                directReply = errReply,
+                plannedTools = emptyList()
+            )
+        }
+        // Only tag as fallback if offline engine didn't already evaluate local calculator/clock/battery/name
+        val usedLocalUtility = offlineFallback.first.contains("Calculator") ||
+            offlineFallback.first.contains("Converter") ||
+            offlineFallback.first.contains("Clock") ||
+            offlineFallback.first.contains("Calendar") ||
+            offlineFallback.first.contains("Telemetry") ||
+            offlineFallback.first.contains("Profile") ||
+            offlineFallback.first.contains("Session Context")
+        val reply = if (usedLocalUtility) {
+            offlineFallback.second.directReply
+        } else {
+            when (intent.detectedLanguage) {
+                "bn" -> "অনলাইন AI সাময়িকভাবে সাড়া দেয়নি ($errDetail)। Settings > AI Provider থেকে Cloudflare Worker অথবা ইন্টারনেট পরীক্ষা করুন।"
+                "hi" -> "ऑनलाइन AI अभी उपलब्ध नहीं है ($errDetail)। Settings > AI Gateway या इंटरनेट जांचें।"
+                else -> "Online AI could not respond right now ($errDetail). Check Settings > AI Gateway or your connection."
             }
         }
+        return "Auto • Fallback ($errDetail)" to ReasoningDecision(
+            thoughtSummary = "Auto fallback after online error: $errDetail",
+            directReply = reply,
+            plannedTools = offlineFallback.second.plannedTools
+        )
     }
 
     suspend fun planFollowUpStep(

@@ -12,7 +12,7 @@ const CORS_HEADERS = {
 };
 
 /**
- * Canonical 19-tool schema registry mirrored with Android ToolRegistry.kt.
+ * Canonical 21-tool schema registry mirrored with Android ToolRegistry.kt.
  */
 const TOOL_SCHEMAS = {
   open_app: {
@@ -66,6 +66,12 @@ const TOOL_SCHEMAS = {
     optional: [],
     description: "Inspect active Android screen UI controls via AccessibilityService."
   },
+  read_screen_aloud: {
+    riskLevel: "MEDIUM",
+    required: [],
+    optional: [],
+    description: "Read visible text or email summary from the active screen aloud."
+  },
   click_ui_element: {
     riskLevel: "MEDIUM",
     required: [],
@@ -83,8 +89,8 @@ const TOOL_SCHEMAS = {
     riskLevel: "LOW",
     required: [],
     optional: ["direction"],
-    enumValues: { direction: ["up", "down"] },
-    description: "Scroll the active accessible window up or down."
+    enumValues: { direction: ["up", "down", "left", "right"] },
+    description: "Scroll or swipe the active accessible window up, down, left, or right."
   },
   press_back: {
     riskLevel: "LOW",
@@ -103,6 +109,13 @@ const TOOL_SCHEMAS = {
     required: ["message"],
     optional: ["recipient", "directSend"],
     description: "Prepare a contextual SMS draft or request confirmation if authorized."
+  },
+  manage_email: {
+    riskLevel: "HIGH",
+    required: ["action"],
+    optional: [],
+    enumValues: { action: ["open_email", "read_email", "next_email", "go_back", "delete_email"] },
+    description: "Open, read, advance, or delete (requires user confirmation) an active email screen."
   },
   open_browser: {
     riskLevel: "LOW",
@@ -413,13 +426,14 @@ export default {
       return reply({
         ok: true,
         service: "ULTRA AI Voice & Agent Gateway",
-        version: "2.2.0",
+        version: "2.3.0",
         d1Configured: Boolean(env.DB),
         kvConfigured: Boolean(env.ULTRA_KV),
         providers: {
           workersAi: Boolean(env.AI),
           openai: Boolean(env.OPENAI_API_KEY),
-          gemini: Boolean(env.GEMINI_API_KEY)
+          gemini: Boolean(env.GEMINI_API_KEY),
+          whisper: Boolean(env.AI)
         }
       });
     }
@@ -535,6 +549,84 @@ export default {
         summary: "metadata_only"
       });
       return reply({ ok: true }, 201);
+    }
+
+    if (url.pathname === "/api/transcribe" && request.method === "POST") {
+      const rate = await checkRateLimit(request, env);
+      if (!rate.allowed) {
+        return reply({ ok: false, error: "Rate limit exceeded. Retry in a minute.", limit: rate.limit }, 429);
+      }
+      if (!env.AI && !env.GEMINI_API_KEY) {
+        return reply({
+          ok: false,
+          error: "Configure Cloudflare Workers AI [ai] binding or GEMINI_API_KEY for /api/transcribe."
+        }, 503);
+      }
+      let body;
+      try {
+        body = await request.json();
+      } catch {
+        return reply({ ok: false, error: "Invalid JSON body" }, 400);
+      }
+      const audioBase64 = String(body.audioBase64 || "").trim();
+      const mimeType = String(body.mimeType || "audio/wav").trim();
+      const languageHint = String(body.language || "Auto").slice(0, 40);
+      if (!audioBase64 || audioBase64.length > 6_000_000) {
+        return reply({ ok: false, error: "Invalid or oversized audio payload" }, 400);
+      }
+      try {
+        if (env.GEMINI_API_KEY) {
+          const model = env.GEMINI_TRANSCRIBE_MODEL || "gemini-3.5-flash-lite";
+          const gUrl = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(env.GEMINI_API_KEY)}`;
+          const res = await fetch(gUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              contents: [{
+                role: "user",
+                parts: [
+                  { inlineData: { mimeType, data: audioBase64 } },
+                  {
+                    text: `Transcribe verbatim in spoken script (English, Bengali, Hindi, or mixed). Language hint: ${languageHint}. Return JSON only: {"transcript":"...","detectedLanguage":"bn|hi|en|mixed"}`
+                  }
+                ]
+              }],
+              generationConfig: { responseMimeType: "application/json", maxOutputTokens: 300 }
+            })
+          });
+          const data = await res.json();
+          if (res.ok) {
+            const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
+            const parsed = JSON.parse(rawText.replace(/^```json\s*/i, "").replace(/```$/i, "").trim());
+            return reply({
+              ok: true,
+              provider: `gemini:${model}`,
+              transcript: String(parsed.transcript || "").trim(),
+              detectedLanguage: String(parsed.detectedLanguage || "en").trim()
+            });
+          }
+        }
+        if (env.AI) {
+          const binaryStr = atob(audioBase64);
+          const bytes = new Array(binaryStr.length);
+          for (let i = 0; i < binaryStr.length; i++) {
+            bytes[i] = binaryStr.charCodeAt(i);
+          }
+          const whisperRes = await env.AI.run("@cf/openai/whisper", { audio: bytes });
+          const text = String(whisperRes?.text || "").trim();
+          const detectedLanguage = /[\u0980-\u09FF]/.test(text) ? "bn" : (/[\u0900-\u097F]/.test(text) ? "hi" : "en");
+          return reply({
+            ok: true,
+            provider: "cloudflare-ai:@cf/openai/whisper",
+            transcript: text,
+            detectedLanguage
+          });
+        }
+        return reply({ ok: false, error: "Audio transcription failed" }, 502);
+      } catch (err) {
+        logStructured("warn", "transcribe_failed", { message: err?.message || "unknown" });
+        return reply({ ok: false, error: "Audio transcription error", detail: String(err?.message || "").slice(0, 200) }, 502);
+      }
     }
 
     if (url.pathname !== "/api/voice" || request.method !== "POST") {

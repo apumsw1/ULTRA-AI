@@ -3,12 +3,18 @@ package com.ultra.assistant.voice
 import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
+import android.media.AudioFormat
 import android.media.AudioManager
+import android.media.AudioTrack
 import android.os.Build
 import android.os.Bundle
 import android.speech.tts.TextToSpeech
 import android.speech.tts.Voice
 import com.ultra.assistant.data.VoiceGender
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withContext
 import java.util.Locale
 
 class SentenceStreamExtractor {
@@ -62,6 +68,17 @@ class SentenceStreamExtractor {
 class VoiceAudioController(context: Context) {
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
     private var focusRequest: AudioFocusRequest? = null
+
+    @Volatile
+    private var activePcmTrack: AudioTrack? = null
+    private val pcmTrackLock = Any()
+
+    companion object {
+        const val GEMINI_TTS_SAMPLE_RATE = 24_000
+
+        /** Keep Android TTS pitch natural (no artificial 0.87x/1.05x robotic formant shift). */
+        fun normalizeFallbackPitch(userPitch: Float): Float = userPitch.coerceIn(0.85f, 1.2f)
+    }
 
     fun requestSpeechFocus(): Boolean {
         val am = audioManager ?: return false
@@ -122,12 +139,108 @@ class VoiceAudioController(context: Context) {
             runCatching { tts.voice = selectedVoice }
         }
 
-        val genderFactor = when (gender) {
-            VoiceGender.FEMALE -> 1.05f
-            VoiceGender.MALE -> 0.87f
-        }
-        val effectivePitch = (userPitch * genderFactor).coerceIn(0.68f, 1.45f)
+        // Avoid artificial 0.87x/1.05x formant shifting that sounds robotic — native voice selection handles gender
+        val effectivePitch = normalizeFallbackPitch(userPitch)
         tts.setPitch(effectivePitch)
+    }
+
+    suspend fun playPcm24kAudio(
+        pcmBytes: ByteArray,
+        volume: Float = 0.95f,
+        speed: Float = 1.0f,
+        shouldContinue: () -> Boolean
+    ): Boolean = withContext(Dispatchers.IO) {
+        if (pcmBytes.size < 4 || !shouldContinue()) return@withContext false
+        val minBuf = AudioTrack.getMinBufferSize(
+            GEMINI_TTS_SAMPLE_RATE,
+            AudioFormat.CHANNEL_OUT_MONO,
+            AudioFormat.ENCODING_PCM_16BIT
+        ).coerceAtLeast(4096)
+        val bufferBytes = maxOf(minBuf * 2, 8192)
+        val attrs = AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_ASSISTANT)
+            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+            .build()
+        val format = AudioFormat.Builder()
+            .setSampleRate(GEMINI_TTS_SAMPLE_RATE)
+            .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+            .build()
+
+        val track = runCatching {
+            AudioTrack.Builder()
+                .setAudioAttributes(attrs)
+                .setAudioFormat(format)
+                .setTransferMode(AudioTrack.MODE_STREAM)
+                .setBufferSizeInBytes(bufferBytes)
+                .build()
+        }.getOrNull() ?: return@withContext false
+
+        if (track.state != AudioTrack.STATE_INITIALIZED) {
+            runCatching { track.release() }
+            return@withContext false
+        }
+
+        synchronized(pcmTrackLock) {
+            stopPcmPlaybackLocked()
+            activePcmTrack = track
+        }
+
+        try {
+            val clampedVol = volume.coerceIn(0.1f, 1.0f)
+            runCatching { track.setVolume(clampedVol) }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && speed != 1.0f) {
+                runCatching {
+                    track.playbackParams = track.playbackParams.setSpeed(speed.coerceIn(0.75f, 1.35f))
+                }
+            }
+            track.play()
+
+            // Stream in ~40ms chunks (1920 bytes at 24kHz mono PCM16) for immediate barge-in cancellation
+            val chunkSize = 3840
+            var offset = 0
+            while (offset < pcmBytes.size && currentCoroutineContext().isActive && shouldContinue()) {
+                val len = minOf(chunkSize, pcmBytes.size - offset)
+                val written = track.write(pcmBytes, offset, len, AudioTrack.WRITE_BLOCKING)
+                if (written <= 0) break
+                offset += written
+            }
+            if (currentCoroutineContext().isActive && shouldContinue()) {
+                runCatching { track.stop() }
+                true
+            } else {
+                false
+            }
+        } catch (_: Throwable) {
+            false
+        } finally {
+            synchronized(pcmTrackLock) {
+                if (activePcmTrack === track) {
+                    activePcmTrack = null
+                }
+            }
+            runCatching {
+                if (track.playState == AudioTrack.PLAYSTATE_PLAYING) track.pause()
+                track.flush()
+            }
+            runCatching { track.release() }
+        }
+    }
+
+    fun stopPcmPlayback() {
+        synchronized(pcmTrackLock) {
+            stopPcmPlaybackLocked()
+        }
+    }
+
+    private fun stopPcmPlaybackLocked() {
+        activePcmTrack?.let { track ->
+            runCatching {
+                if (track.playState == AudioTrack.PLAYSTATE_PLAYING) track.pause()
+                track.flush()
+            }
+        }
+        activePcmTrack = null
     }
 
     fun speakNaturally(

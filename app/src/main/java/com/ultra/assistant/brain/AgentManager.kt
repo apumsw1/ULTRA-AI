@@ -165,39 +165,46 @@ class AgentManager(
             val effectiveOffline = reasoningEngine.isEffectiveOffline()
 
             // Stream analytical ChatGPT-style conversation directly when online and not an action command
+            var streamedFailureError: String? = null
             if (intent.category == IntentCategory.CONVERSATION &&
                 !effectiveOffline &&
                 !looksLikeActionRequest(input)
             ) {
                 _liveStatus.value = "✦ Thinking..."
-                val streamed = tryStreamConversation(
+                when (val outcome = tryStreamConversation(
                     input = input,
                     history = history,
                     memories = memories,
                     userDisplayName = settingsSnapshot.userDisplayName,
                     lang = intent.detectedLanguage
-                )
-                if (streamed != null) {
-                    traces += AgentStepTrace(2, "PLAN", streamed.thoughtSummary.ifBlank { "Streamed conversational reasoning" })
-                    memoryManager.recordConversationTurn("user", input, intent.detectedLanguage)
-                    memoryManager.recordConversationTurn(
-                        role = "assistant",
-                        content = streamed.reply,
-                        languageTag = intent.detectedLanguage,
-                        providerLabel = streamed.provider,
-                        thoughtSummary = streamed.thoughtSummary
-                    )
-                    contextManager.lastTopic = input.take(80)
-                    val report = AgentExecutionReport(
-                        userInput = input,
-                        providerUsed = streamed.provider,
-                        finalReply = streamed.reply,
-                        steps = traces,
-                        toolResults = emptyList(),
-                        thoughtSummary = streamed.thoughtSummary
-                    )
-                    _latestReport.value = report
-                    return report
+                )) {
+                    is StreamOutcome.Success -> {
+                        val streamed = outcome.result
+                        traces += AgentStepTrace(2, "PLAN", streamed.thoughtSummary.ifBlank { "Streamed conversational reasoning" })
+                        memoryManager.recordConversationTurn("user", input, intent.detectedLanguage)
+                        memoryManager.recordConversationTurn(
+                            role = "assistant",
+                            content = streamed.reply,
+                            languageTag = intent.detectedLanguage,
+                            providerLabel = streamed.provider,
+                            thoughtSummary = streamed.thoughtSummary
+                        )
+                        contextManager.lastTopic = input.take(80)
+                        val report = AgentExecutionReport(
+                            userInput = input,
+                            providerUsed = streamed.provider,
+                            finalReply = streamed.reply,
+                            steps = traces,
+                            toolResults = emptyList(),
+                            thoughtSummary = streamed.thoughtSummary
+                        )
+                        _latestReport.value = report
+                        return report
+                    }
+                    is StreamOutcome.Failed -> {
+                        streamedFailureError = outcome.reason
+                        traces += AgentStepTrace(2, "PLAN", "Online stream failed: ${outcome.reason}", success = false)
+                    }
                 }
             }
 
@@ -210,7 +217,9 @@ class AgentManager(
                 intent = intent,
                 history = history,
                 memorySummary = memories,
-                toolCatalogJson = toolCatalogJson
+                toolCatalogJson = toolCatalogJson,
+                skipRemoteAi = streamedFailureError != null,
+                priorOnlineError = streamedFailureError
             )
             val accumulatedThoughts = mutableListOf<String>()
             if (initialDecision.thoughtSummary.isNotBlank()) {
@@ -385,13 +394,18 @@ class AgentManager(
         val thoughtSummary: String
     )
 
+    private sealed interface StreamOutcome {
+        data class Success(val result: StreamResult) : StreamOutcome
+        data class Failed(val reason: String) : StreamOutcome
+    }
+
     private suspend fun tryStreamConversation(
         input: String,
         history: List<Pair<String, String>>,
         memories: String,
         userDisplayName: String,
         lang: String
-    ): StreamResult? {
+    ): StreamOutcome {
         val langLabel = when (lang) {
             "bn" -> "বাংলা"
             "hi" -> "हिन्दी"
@@ -423,15 +437,19 @@ class AgentManager(
             _isStreaming.value = false
             _streamingReply.value = ""
             val (thought, visibleReply) = extractThoughtAndReply(rawBuffer)
-            if (visibleReply.isBlank()) null else StreamResult("Online • ChatGPT Brain", visibleReply, thought)
+            if (visibleReply.isBlank()) {
+                StreamOutcome.Failed("Empty AI response")
+            } else {
+                StreamOutcome.Success(StreamResult("Online • ChatGPT Brain", visibleReply, thought))
+            }
         } catch (e: CancellationException) {
             _isStreaming.value = false
             _streamingReply.value = ""
             throw e
-        } catch (_: Exception) {
+        } catch (e: Exception) {
             _isStreaming.value = false
             _streamingReply.value = ""
-            null
+            StreamOutcome.Failed(e.localizedMessage ?: "Online request failed")
         }
     }
 

@@ -90,48 +90,61 @@ fun AmbientEdgeGlow(
     enabled: Boolean,
     modifier: Modifier = Modifier
 ) {
+    val upperState = voiceState.uppercase()
+    val effectiveActive = enabled && isActive && upperState !in setOf("IDLE", "STOPPED")
     val visibilityAlpha by animateFloatAsState(
-        targetValue = if (enabled && isActive) 1f else 0f,
-        animationSpec = tween(durationMillis = 650),
+        targetValue = if (effectiveActive) 1f else 0f,
+        animationSpec = tween(durationMillis = 450),
         label = "edgeGlowFade"
     )
     if (visibilityAlpha <= 0.01f) return
 
-    val transition = rememberInfiniteTransition(label = "ambientEdge")
-    val sweepAngle by transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 360f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 7500, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "edgeSweep"
+    val needsAnimation = upperState in setOf(
+        "USER_SPEAKING", "THINKING", "PROCESSING", "SPEAKING", "EXECUTING_ACTION", "VERIFYING"
     )
-    val breathe by transition.animateFloat(
-        initialValue = 0.65f,
-        targetValue = 1.0f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 2400),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "edgeBreathe"
-    )
+    val sweepAngle: Float
+    val breathe: Float
+    if (needsAnimation) {
+        val transition = rememberInfiniteTransition(label = "ambientEdge")
+        val animSweep by transition.animateFloat(
+            initialValue = 0f,
+            targetValue = 360f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 7500, easing = LinearEasing),
+                repeatMode = RepeatMode.Restart
+            ),
+            label = "edgeSweep"
+        )
+        val animBreathe by transition.animateFloat(
+            initialValue = 0.70f,
+            targetValue = 1.0f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 2200),
+                repeatMode = RepeatMode.Reverse
+            ),
+            label = "edgeBreathe"
+        )
+        sweepAngle = animSweep
+        breathe = animBreathe
+    } else {
+        sweepAngle = 0f
+        breathe = 0.85f
+    }
 
-    val intensityMultiplier = when (voiceState.uppercase()) {
+    val intensityMultiplier = when (upperState) {
         "USER_SPEAKING" -> 1.12f
-        "LISTENING", "CONNECTING" -> 0.96f
+        "LISTENING", "CONNECTING" -> 0.86f
         "SPEAKING" -> 0.94f
         "THINKING", "PROCESSING", "EXECUTING_ACTION", "VERIFYING" -> 0.98f
-        "INTERRUPTED", "RECONNECTING", "OFFLINE" -> 0.78f
-        "ERROR" -> 1.0f
-        "STOPPED", "IDLE" -> 0f
-        else -> 0.68f
+        "INTERRUPTED", "RECONNECTING", "OFFLINE" -> 0.72f
+        "ERROR" -> 0.96f
+        else -> 0.65f
     }
 
     Canvas(modifier = modifier.fillMaxSize()) {
-        val alpha = (0.36f * visibilityAlpha * breathe * intensityMultiplier).coerceIn(0f, 0.55f)
+        val alpha = (0.34f * visibilityAlpha * breathe * intensityMultiplier).coerceIn(0f, 0.52f)
         if (alpha <= 0.01f) return@Canvas
-        val edgeColors = when (voiceState.uppercase()) {
+        val edgeColors = when (upperState) {
             "ERROR" -> listOf(
                 Color(0xFFFF4D6D).copy(alpha = alpha),
                 Color(0xFFFF8FA3).copy(alpha = alpha * 0.7f),
@@ -156,8 +169,8 @@ fun AmbientEdgeGlow(
                 AmbientLightBlue.copy(alpha = alpha)
             )
         }
-        val softHaloStroke = 14.dp.toPx()
-        val crispRimStroke = 2.5.dp.toPx()
+        val softHaloStroke = 12.dp.toPx()
+        val crispRimStroke = 2.dp.toPx()
         val corner = CornerRadius(26.dp.toPx(), 26.dp.toPx())
 
         rotate(degrees = sweepAngle, pivot = Offset(size.width / 2f, size.height / 2f)) {

@@ -225,7 +225,6 @@ fun UltraAuthenticatedShell(
     var isServiceRunning by remember { mutableStateOf(VoiceAssistantService.isRunning) }
     var isSessionListening by remember { mutableStateOf(VoiceAssistantService.isSessionListening) }
     var voiceState by remember { mutableStateOf(VoiceAssistantService.currentState) }
-    var voiceLevel by remember { mutableFloatStateOf(0f) }
     var audioHardwareSummary by remember { mutableStateOf(VoiceAssistantService.latestHardwareStatus.summaryLabel()) }
     var partialTranscript by remember { mutableStateOf("") }
     var lastRecognizedText by remember { mutableStateOf("") }
@@ -272,9 +271,6 @@ fun UltraAuthenticatedShell(
                         partialTranscript = ""
                         lastRecognizedText = intent.getStringExtra("text").orEmpty()
                     }
-                    VoiceAssistantService.BROADCAST_VOICE_LEVEL -> {
-                        voiceLevel = intent.getFloatExtra("level", 0f)
-                    }
                     VoiceAssistantService.BROADCAST_AGENT_REPLY -> {
                         lastAgentReply = intent.getStringExtra("reply").orEmpty()
                     }
@@ -288,7 +284,6 @@ fun UltraAuthenticatedShell(
             addAction(VoiceAssistantService.BROADCAST_VOICE_STATE)
             addAction(VoiceAssistantService.BROADCAST_VOICE_PARTIAL)
             addAction(VoiceAssistantService.BROADCAST_VOICE_TEXT)
-            addAction(VoiceAssistantService.BROADCAST_VOICE_LEVEL)
             addAction(VoiceAssistantService.BROADCAST_AGENT_REPLY)
             addAction(VoiceAssistantService.BROADCAST_AUDIO_STATUS)
         }
@@ -644,7 +639,7 @@ fun UltraAuthenticatedShell(
                                     isServiceRunning = isServiceRunning,
                                     isSessionListening = isSessionListening,
                                     voiceState = voiceState,
-                                    voiceLevel = voiceLevel,
+                                    voiceLevel = 0f,
                                     audioHardwareSummary = audioHardwareSummary,
                                     partialTranscript = partialTranscript,
                                     lastRecognizedText = lastRecognizedText,

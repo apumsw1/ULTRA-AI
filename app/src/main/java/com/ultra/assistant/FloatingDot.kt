@@ -1,6 +1,5 @@
 package com.ultra.assistant
 
-import android.animation.ValueAnimator
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
@@ -19,7 +18,6 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
-import android.view.animation.LinearInterpolator
 import android.widget.TextView
 import kotlin.math.PI
 import kotlin.math.abs
@@ -677,6 +675,11 @@ private class SystemEdgeGlowOverlayView(context: Context) : View(context) {
     private var sweepDeg = 0f
     private var currentState = "LISTENING"
     private val shaderMatrix = Matrix()
+    private var cachedShader: SweepGradient? = null
+    private var cachedWidth = 0f
+    private var cachedHeight = 0f
+    private var cachedStateKey = ""
+    private var animating = false
 
     private fun dp(v: Float): Float = TypedValue.applyDimension(
         TypedValue.COMPLEX_UNIT_DIP,
@@ -686,36 +689,70 @@ private class SystemEdgeGlowOverlayView(context: Context) : View(context) {
 
     private val haloPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
-        strokeWidth = dp(10f)
+        strokeWidth = dp(8f)
     }
     private val rimPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         strokeWidth = dp(2f)
     }
-    private var animator: ValueAnimator? = null
+    private val tickRunnable = object : Runnable {
+        override fun run() {
+            if (!animating || !isAttachedToWindow) return
+            sweepDeg = (sweepDeg + 6f) % 360f
+            cachedShader?.let { shader ->
+                shaderMatrix.setRotate(sweepDeg, cachedWidth / 2f, cachedHeight / 2f)
+                shader.setLocalMatrix(shaderMatrix)
+            }
+            invalidate()
+            postDelayed(this, 66L) // ~15fps only during active bursts
+        }
+    }
 
     fun updateState(state: String) {
         currentState = state
-        ensureAnimating()
+        val upper = state.uppercase()
+        val shouldAnimate = upper in setOf(
+            "USER_SPEAKING", "PROCESSING", "THINKING", "SPEAKING", "EXECUTING_ACTION", "VERIFYING"
+        )
+        if (shouldAnimate) {
+            if (!animating) {
+                animating = true
+                removeCallbacks(tickRunnable)
+                postDelayed(tickRunnable, 66L)
+            }
+        } else {
+            stopAnimation()
+        }
         invalidate()
     }
 
     fun stopAnimation() {
-        animator?.cancel()
-        animator = null
+        animating = false
+        removeCallbacks(tickRunnable)
     }
 
-    private fun ensureAnimating() {
-        if (animator?.isRunning == true) return
-        animator = ValueAnimator.ofFloat(0f, 360f).apply {
-            duration = 6500L
-            repeatCount = ValueAnimator.INFINITE
-            interpolator = LinearInterpolator()
-            addUpdateListener {
-                sweepDeg = it.animatedValue as Float
-                invalidate()
+    private fun ensureShader(w: Float, h: Float) {
+        val stateKey = when (currentState.uppercase()) {
+            "ERROR" -> "ERR"
+            "PROCESSING", "THINKING" -> "THINK"
+            "SPEAKING", "EXECUTING_ACTION", "VERIFYING" -> "ACT"
+            "RECONNECTING", "OFFLINE", "INTERRUPTED" -> "WARN"
+            else -> "IDLE"
+        }
+        if (cachedShader == null || cachedWidth != w || cachedHeight != h || cachedStateKey != stateKey) {
+            val colors = when (stateKey) {
+                "ERR" -> intArrayOf(0x66FF4D6D, 0x33FF8FA3, 0x66FF4D6D)
+                "THINK" -> intArrayOf(0x668B5CF6, 0x5538F2FF, 0x66C084FC, 0x668B5CF6)
+                "ACT" -> intArrayOf(0x6634D399, 0x5538F2FF, 0x6610B981, 0x6634D399)
+                "WARN" -> intArrayOf(0x55FFB347, 0x3338F2FF, 0x55FFB347)
+                else -> intArrayOf(0x5538F2FF, 0x4400B4D8, 0x5534D399, 0x5538F2FF)
             }
-            start()
+            cachedShader = SweepGradient(w / 2f, h / 2f, colors, null)
+            cachedWidth = w
+            cachedHeight = h
+            cachedStateKey = stateKey
+            haloPaint.shader = cachedShader
+            rimPaint.shader = cachedShader
         }
     }
 
@@ -724,19 +761,7 @@ private class SystemEdgeGlowOverlayView(context: Context) : View(context) {
         val w = width.toFloat()
         val h = height.toFloat()
         if (w <= 0f || h <= 0f) return
-
-        val colors = when (currentState.uppercase()) {
-            "ERROR" -> intArrayOf(0x66FF4D6D, 0x33FF8FA3, 0x66FF4D6D)
-            "PROCESSING", "THINKING" -> intArrayOf(0x668B5CF6, 0x5538F2FF, 0x66C084FC, 0x668B5CF6)
-            "SPEAKING", "EXECUTING_ACTION", "VERIFYING" -> intArrayOf(0x6634D399, 0x5538F2FF, 0x6610B981, 0x6634D399)
-            "RECONNECTING", "OFFLINE", "INTERRUPTED" -> intArrayOf(0x55FFB347, 0x3338F2FF, 0x55FFB347)
-            else -> intArrayOf(0x5538F2FF, 0x4400B4D8, 0x5534D399, 0x5538F2FF)
-        }
-        val sweep = SweepGradient(w / 2f, h / 2f, colors, null)
-        shaderMatrix.setRotate(sweepDeg, w / 2f, h / 2f)
-        sweep.setLocalMatrix(shaderMatrix)
-        haloPaint.shader = sweep
-        rimPaint.shader = sweep
+        ensureShader(w, h)
 
         val r = dp(24f)
         canvas.drawRoundRect(dp(3f), dp(3f), w - dp(3f), h - dp(3f), r, r, haloPaint)

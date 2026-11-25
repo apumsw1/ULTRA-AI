@@ -1,16 +1,24 @@
 package com.ultra.assistant.brain
 
+import android.util.Base64
 import android.util.Log
 import com.google.firebase.Firebase
 import com.google.firebase.FirebaseApp
 import com.google.firebase.ai.ai
+import com.google.firebase.ai.type.GenerativeBackend
+import com.google.firebase.ai.type.InlineDataPart
+import com.google.firebase.ai.type.PublicPreviewAPI
+import com.google.firebase.ai.type.ResponseModality
 import com.google.firebase.ai.type.Schema
+import com.google.firebase.ai.type.SpeechConfig
+import com.google.firebase.ai.type.Voice
 import com.google.firebase.ai.type.content
 import com.google.firebase.ai.type.generationConfig
 import com.ultra.assistant.data.AiProviderMode
 import com.ultra.assistant.data.AiSpeedProfile
 import com.ultra.assistant.data.LocalSettingsRepository
 import com.ultra.assistant.data.NetworkMonitor
+import com.ultra.assistant.data.VoiceGender
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
@@ -115,6 +123,60 @@ class ModelRouter(
         }
     )
 
+    private val femaleNeuralTtsModel by lazy { createNeuralTtsModel(selectGeminiTtsVoiceName(VoiceGender.FEMALE)) }
+    private val maleNeuralTtsModel by lazy { createNeuralTtsModel(selectGeminiTtsVoiceName(VoiceGender.MALE)) }
+
+    @OptIn(PublicPreviewAPI::class)
+    private fun createNeuralTtsModel(voiceName: String) = Firebase.ai(backend = GenerativeBackend.googleAI()).generativeModel(
+        modelName = GEMINI_TTS_MODEL,
+        generationConfig = generationConfig {
+            responseModalities = listOf(ResponseModality.AUDIO)
+            speechConfig = SpeechConfig(voice = Voice(voiceName))
+        }
+    )
+
+    suspend fun synthesizeNaturalSpeech(
+        text: String,
+        voiceGender: VoiceGender,
+        languageHint: String = "Auto"
+    ): Result<ByteArray> {
+        val cleanText = text.trim().take(900)
+        if (cleanText.isBlank()) {
+            return Result.failure(IllegalArgumentException("Empty speech text"))
+        }
+        if (networkMonitor != null && !networkMonitor.checkCurrentConnectivity()) {
+            return Result.failure(IllegalStateException("Offline"))
+        }
+        val firebaseReady = runCatching { FirebaseApp.getInstance() }.isSuccess
+        if (!firebaseReady) {
+            return Result.failure(IllegalStateException("Firebase AI not initialized"))
+        }
+        return try {
+            val model = if (voiceGender == VoiceGender.FEMALE) femaleNeuralTtsModel else maleNeuralTtsModel
+            val prompt = "Read aloud in a warm, natural, human conversational voice matching the script/language ($languageHint): $cleanText"
+            val response = withTimeout(12_000L) {
+                model.generateContent(prompt)
+            }
+            val pcmBytes = response.candidates
+                .firstOrNull()
+                ?.content
+                ?.parts
+                ?.filterIsInstance<InlineDataPart>()
+                ?.firstOrNull()
+                ?.inlineData
+            if (pcmBytes == null || pcmBytes.isEmpty()) {
+                Result.failure(IllegalStateException("Empty Gemini TTS audio"))
+            } else {
+                Result.success(pcmBytes)
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "Gemini neural TTS unavailable, falling back cleanly", e)
+            Result.failure(IllegalStateException(sanitizeOnlineError(e.localizedMessage ?: "Neural TTS failed")))
+        }
+    }
+
     suspend fun transcribeMultilingualAudio(
         wavBytes: ByteArray,
         languageHint: String = "Auto"
@@ -127,12 +189,41 @@ class ModelRouter(
             _onlineDiagnostic.value = msg
             return Result.failure(IllegalStateException(msg))
         }
+        val settings = settingsRepository.settingsFlow.first()
         val firebaseReady = runCatching { FirebaseApp.getInstance() }.isSuccess
-        if (!firebaseReady) {
-            return Result.failure(IllegalStateException("Firebase AI not initialized"))
+
+        if (settings.aiProviderMode == AiProviderMode.CLOUDFLARE_WORKER) {
+            val workerRes = transcribeViaCloudflareWorker(
+                baseUrl = settings.workerEndpoint,
+                authToken = settings.workerAuthToken,
+                wavBytes = wavBytes,
+                languageHint = languageHint
+            )
+            if (workerRes.isSuccess || !firebaseReady) return workerRes
         }
+
+        if (firebaseReady) {
+            val geminiRes = transcribeViaFirebaseAi(wavBytes, languageHint)
+            if (geminiRes.isSuccess || settings.aiProviderMode == AiProviderMode.FIREBASE_AI) {
+                return geminiRes
+            }
+        }
+
+        // Fallback to Cloudflare Worker /api/transcribe when Firebase AI fails or isn't initialized
+        return transcribeViaCloudflareWorker(
+            baseUrl = settings.workerEndpoint,
+            authToken = settings.workerAuthToken,
+            wavBytes = wavBytes,
+            languageHint = languageHint
+        )
+    }
+
+    private suspend fun transcribeViaFirebaseAi(
+        wavBytes: ByteArray,
+        languageHint: String
+    ): Result<Pair<String, String>> {
         return try {
-            val response = withTimeout(20_000L) {
+            val response = withTimeout(12_000L) {
                 audioTranscriberModel.generateContent(
                     content {
                         inlineData(wavBytes, "audio/wav")
@@ -159,6 +250,56 @@ class ModelRouter(
             Result.failure(IllegalStateException(msg))
         } catch (e: Exception) {
             val msg = sanitizeOnlineError(e.localizedMessage ?: "Audio transcription failed")
+            _onlineDiagnostic.value = msg
+            Result.failure(IllegalStateException(msg))
+        }
+    }
+
+    private suspend fun transcribeViaCloudflareWorker(
+        baseUrl: String,
+        authToken: String,
+        wavBytes: ByteArray,
+        languageHint: String
+    ): Result<Pair<String, String>> = withContext(Dispatchers.IO) {
+        try {
+            val cleanBase = baseUrl.trim().trimEnd('/')
+            if (cleanBase.isBlank()) {
+                return@withContext Result.failure(IllegalStateException("Cloudflare Worker URL is empty"))
+            }
+            val audioB64 = Base64.encodeToString(wavBytes, Base64.NO_WRAP)
+            val bodyJson = JSONObject().apply {
+                put("audioBase64", audioB64)
+                put("mimeType", "audio/wav")
+                put("language", languageHint)
+            }
+            val reqBuilder = Request.Builder()
+                .url("$cleanBase/api/transcribe")
+                .post(bodyJson.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+            if (authToken.isNotBlank()) {
+                reqBuilder.header("Authorization", "Bearer ${authToken.trim()}")
+            }
+            httpClient.newCall(reqBuilder.build()).execute().use { response ->
+                val raw = response.body?.string().orEmpty()
+                if (!response.isSuccessful) {
+                    val friendlyErr = parseWorkerError(response.code, raw)
+                    _onlineDiagnostic.value = friendlyErr
+                    return@withContext Result.failure(IllegalStateException(friendlyErr))
+                }
+                val obj = JSONObject(raw)
+                if (!obj.optBoolean("ok", false)) {
+                    val err = sanitizeOnlineError(obj.optString("error", "Gateway transcribe error"))
+                    _onlineDiagnostic.value = err
+                    return@withContext Result.failure(IllegalStateException(err))
+                }
+                val transcript = obj.optString("transcript", "").trim()
+                val lang = obj.optString("detectedLanguage", "en").trim().ifBlank { "en" }
+                _onlineDiagnostic.value = "Connected (Worker Audio)"
+                Result.success(transcript to lang)
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            val msg = sanitizeOnlineError(e.message ?: "Worker transcribe failed")
             _onlineDiagnostic.value = msg
             Result.failure(IllegalStateException(msg))
         }
@@ -569,9 +710,9 @@ Instructions:
     }
 
     private fun resolveTimeoutMs(profile: AiSpeedProfile): Long = when (profile) {
-        AiSpeedProfile.TURBO -> 30_000L
-        AiSpeedProfile.BALANCED -> 45_000L
-        AiSpeedProfile.DEEP_THINK -> 60_000L
+        AiSpeedProfile.TURBO -> 18_000L
+        AiSpeedProfile.BALANCED -> 25_000L
+        AiSpeedProfile.DEEP_THINK -> 35_000L
     }
 
     private fun parseWorkerError(code: Int, rawBody: String): String {
@@ -680,5 +821,14 @@ $toolCatalogJson
 User Request:
 $userMessage
         """.trimIndent()
+    }
+
+    companion object {
+        const val GEMINI_TTS_MODEL = "gemini-3.1-flash-tts-preview"
+
+        fun selectGeminiTtsVoiceName(gender: VoiceGender): String = when (gender) {
+            VoiceGender.FEMALE -> "Sulafat"
+            VoiceGender.MALE -> "Puck"
+        }
     }
 }

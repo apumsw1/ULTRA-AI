@@ -292,6 +292,16 @@ class UltraRobolectricTest {
         assertFalse(swipeResult.success)
         assertEquals(PermissionRequirement.ACCESSIBILITY, swipeResult.missingPermission)
     }
+
+    @Test
+    fun `settings default to Auto language and voice level flow starts idle`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val freshPrefs = context.getSharedPreferences("ultra_local_settings", Context.MODE_PRIVATE)
+        freshPrefs.edit().clear().commit()
+        val settingsRepo = LocalSettingsRepository(context)
+        assertEquals("Auto", settingsRepo.language())
+        assertEquals(0f, VoiceAssistantService.voiceLevelFlow.value, 0.001f)
+    }
 }
 
 private suspend fun <T> kotlinx.coroutines.flow.Flow<T>.firstOrNullCompat(): T? {

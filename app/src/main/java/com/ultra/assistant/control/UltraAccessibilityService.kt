@@ -49,16 +49,23 @@ class UltraAccessibilityService : AccessibilityService() {
         _connected.value = true
     }
 
+    @Volatile
+    private var lastSnapshotEventMs: Long = 0L
+
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
         val pkg = event.packageName?.toString().orEmpty()
-        if (pkg.isNotBlank()) {
+        if (pkg.isNotBlank() && _activePackage.value != pkg) {
             _activePackage.value = pkg
         }
-        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
-            event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
-        ) {
-            captureCurrentSnapshot()?.let { _latestSnapshot.value = it }
+        // Only capture passive snapshot on actual window transitions, throttled >= 1200ms,
+        // never on high-frequency TYPE_WINDOW_CONTENT_CHANGED ticks while scrolling or typing.
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            val now = System.currentTimeMillis()
+            if (shouldRefreshPassiveSnapshot(lastSnapshotEventMs, now)) {
+                lastSnapshotEventMs = now
+                captureCurrentSnapshot()?.let { _latestSnapshot.value = it }
+            }
         }
     }
 
@@ -539,6 +546,12 @@ class UltraAccessibilityService : AccessibilityService() {
 
         private val _latestSnapshot = MutableStateFlow<AccessibleScreenSnapshot?>(null)
         val latestSnapshotFlow: StateFlow<AccessibleScreenSnapshot?> = _latestSnapshot.asStateFlow()
+
+        const val PASSIVE_SNAPSHOT_DEBOUNCE_MS = 1200L
+
+        fun shouldRefreshPassiveSnapshot(lastCaptureMs: Long, nowMs: Long): Boolean {
+            return (nowMs - lastCaptureMs) >= PASSIVE_SNAPSHOT_DEBOUNCE_MS
+        }
 
         fun isServiceConnected(): Boolean = instanceRef?.get() != null && _connected.value
 

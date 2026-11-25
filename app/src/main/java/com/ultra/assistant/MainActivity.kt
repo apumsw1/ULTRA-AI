@@ -24,7 +24,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.AutoMode
 import androidx.compose.material.icons.filled.Build
-import androidx.compose.material.icons.filled.Chat
+import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
@@ -102,7 +102,7 @@ private data class NavTab(
 )
 
 private val primaryTabs = listOf(
-    NavTab(UltraRoutes.HOME, "Chat", Icons.Default.Chat),
+    NavTab(UltraRoutes.HOME, "Chat", Icons.AutoMirrored.Filled.Chat),
     NavTab(UltraRoutes.VOICE, "Voice", Icons.Default.Mic),
     NavTab(UltraRoutes.CONTROL, "Control", Icons.Default.Build),
     NavTab(UltraRoutes.AUTOMATION, "Auto", Icons.Default.AutoMode),

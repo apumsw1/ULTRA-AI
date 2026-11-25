@@ -58,6 +58,34 @@ jobs:
             echo "GOOGLE_SERVICES_JSON secret not set; continuing with MissingGoogleServicesStrategy.WARN"
           fi
 
+      - name: Cache Robolectric Android 16 SDK Jar
+        id: cache-robolectric
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository/org/robolectric/android-all-instrumented/16-robolectric-13921718-i7
+          key: robolectric-16-robolectric-13921718-i7
+
+      - name: Download Robolectric Android 16 SDK Jar
+        if: steps.cache-robolectric.outputs.cache-hit != 'true'
+        run: |
+          DEST="$HOME/.m2/repository/org/robolectric/android-all-instrumented/16-robolectric-13921718-i7"
+          mkdir -p "$DEST"
+          JAR="android-all-instrumented-16-robolectric-13921718-i7.jar"
+          POM="android-all-instrumented-16-robolectric-13921718-i7.pom"
+          BASE_PATH="org/robolectric/android-all-instrumented/16-robolectric-13921718-i7"
+          if [ ! -s "$DEST/$JAR" ]; then
+            curl -fSL --retry 5 --retry-delay 3 --retry-all-errors -A "Mozilla/5.0" \
+              "https://repo1.maven.org/maven2/$BASE_PATH/$JAR" -o "$DEST/$JAR" \
+              || curl -fSL --retry 5 --retry-delay 3 --retry-all-errors -A "Mozilla/5.0" \
+              "https://maven-central.storage-download.googleapis.com/maven2/$BASE_PATH/$JAR" -o "$DEST/$JAR"
+          fi
+          if [ ! -s "$DEST/$POM" ]; then
+            curl -fSL --retry 3 --retry-delay 2 -A "Mozilla/5.0" \
+              "https://repo1.maven.org/maven2/$BASE_PATH/$POM" -o "$DEST/$POM" \
+              || curl -fSL --retry 3 --retry-delay 2 -A "Mozilla/5.0" \
+              "https://maven-central.storage-download.googleapis.com/maven2/$BASE_PATH/$POM" -o "$DEST/$POM" || true
+          fi
+
       - name: Run Unit Tests
         run: gradle --no-daemon testDebugUnitTest --stacktrace --console=plain
 

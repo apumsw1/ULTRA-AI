@@ -67,11 +67,21 @@ android {
     unitTests {
       isIncludeAndroidResources = true
       all {
-        val cachedDir = file("/home/appuser/.m2/repository/org/robolectric/android-all-instrumented/16-robolectric-13921718-i7")
-        if (cachedDir.exists()) {
+        val sdkDirSuffix = ".m2/repository/org/robolectric/android-all-instrumented/16-robolectric-13921718-i7"
+        val cachedDir = listOf(
+          file("/home/appuser/$sdkDirSuffix"),
+          file("${System.getProperty("user.home")}/$sdkDirSuffix")
+        ).firstOrNull { dir ->
+          dir.exists() && (dir.listFiles()?.any { f -> f.isFile && f.name.endsWith(".jar") && f.length() > 0L } == true)
+        }
+        if (cachedDir != null) {
           it.systemProperty("robolectric.offline", "true")
           it.systemProperty("robolectric.dependency.dir", cachedDir.absolutePath)
+        } else {
+          it.systemProperty("robolectric.dependency.repo.id", "mavenCentralMirror")
+          it.systemProperty("robolectric.dependency.repo.url", "https://maven-central.storage-download.googleapis.com/maven2")
         }
+        it.maxParallelForks = 1
       }
     }
   }

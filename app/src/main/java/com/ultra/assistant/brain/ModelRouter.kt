@@ -1001,9 +1001,10 @@ $userMessage
                     val obj = toolArray.optJSONObject(i) ?: continue
                     val toolId = obj.optString("toolId", "").trim()
                     if (toolId.isBlank()) continue
+                    val argsObj = obj.optJSONObject("args")
                     val argsObjStr = when {
                         obj.has("argsJson") -> obj.optString("argsJson", "{}")
-                        obj.optJSONObject("args") != null -> obj.optJSONObject("args").toString()
+                        argsObj != null -> argsObj.toString()
                         else -> "{}"
                     }
                     val argsMap = mutableMapOf<String, String>()

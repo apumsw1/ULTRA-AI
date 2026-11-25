@@ -103,6 +103,7 @@ fun HomeScreen(
     voiceState: String,
     partialTranscript: String,
     isOnline: Boolean,
+    isReconnecting: Boolean,
     settings: UltraSettings,
     permissions: PermissionAuditSnapshot,
     isBusy: Boolean,
@@ -174,17 +175,17 @@ fun HomeScreen(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("Conversation History", style = MaterialTheme.typography.titleMedium)
+                    Text("Session History (RAM-Only)", style = MaterialTheme.typography.titleMedium)
                     TextButton(onClick = {
                         onStartNewChat()
                         showHistorySheet = false
                     }) {
-                        Text("+ New Chat")
+                        Text("+ New Session")
                     }
                 }
                 if (sessions.isEmpty()) {
                     Text(
-                        "No saved chats yet. Start typing or speaking to begin.",
+                        "Temporary session only — conversations clear automatically when you close the app.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(bottom = 24.dp)
@@ -366,7 +367,13 @@ fun HomeScreen(
                                     modifier = Modifier
                                         .size(8.dp)
                                         .clip(CircleShape)
-                                        .background(if (effectiveOnline) EmeraldVerified else AmberWarning)
+                                        .background(
+                                            when {
+                                                isReconnecting -> ArcCyan
+                                                effectiveOnline -> EmeraldVerified
+                                                else -> AmberWarning
+                                            }
+                                        )
                                 )
                                 Text(
                                     text = when {
@@ -374,6 +381,7 @@ fun HomeScreen(
                                         listening -> "Listening..."
                                         liveAgentStatus.isNotBlank() -> liveAgentStatus
                                         isBusy || isStreaming -> "Thinking..."
+                                        isReconnecting -> "Reconnecting..."
                                         effectiveOnline -> "Online • ${settings.aiSpeedProfile.name.replace('_', ' ')}"
                                         else -> "Offline Local Mode"
                                     },
@@ -437,11 +445,19 @@ fun HomeScreen(
                 ) {
                     JarvisChip(
                         label = when (settings.operatingMode) {
-                            AiOperatingMode.AUTO -> if (isOnline) "Mode: Auto (Online)" else "Mode: Auto (Offline)"
-                            AiOperatingMode.ONLINE -> "Mode: Online Force"
+                            AiOperatingMode.AUTO -> when {
+                                isReconnecting -> "Mode: Reconnecting..."
+                                isOnline -> "Mode: Auto (Online)"
+                                else -> "Mode: Auto (Offline)"
+                            }
+                            AiOperatingMode.ONLINE -> if (isOnline) "Mode: Online Force" else "Mode: Online (No Net)"
                             AiOperatingMode.OFFLINE -> "Mode: Offline Local"
                         },
-                        accent = if (effectiveOnline) EmeraldVerified else AmberWarning,
+                        accent = when {
+                            isReconnecting -> ArcCyan
+                            effectiveOnline -> EmeraldVerified
+                            else -> AmberWarning
+                        },
                         onClick = onCycleOperatingMode,
                         testTag = "home_mode_chip"
                     )
@@ -464,7 +480,9 @@ fun HomeScreen(
                     )
                     if (onlineDiagnostic.isNotBlank() &&
                         !onlineDiagnostic.startsWith("Connected") &&
-                        !onlineDiagnostic.startsWith("Health OK")
+                        !onlineDiagnostic.startsWith("Health OK") &&
+                        isOnline &&
+                        settings.operatingMode != AiOperatingMode.OFFLINE
                     ) {
                         JarvisChip(
                             label = onlineDiagnostic.take(28),
@@ -500,7 +518,11 @@ fun HomeScreen(
                             .border(2.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.7f), CircleShape)
                     )
                     Text(
-                        text = "How can I help you today?",
+                        text = if (settings.userDisplayName.isNotBlank()) {
+                            "How can I help you today, ${settings.userDisplayName}?"
+                        } else {
+                            "How can I help you today?"
+                        },
                         style = MaterialTheme.typography.headlineMedium,
                         fontWeight = FontWeight.SemiBold,
                         color = MaterialTheme.colorScheme.onBackground

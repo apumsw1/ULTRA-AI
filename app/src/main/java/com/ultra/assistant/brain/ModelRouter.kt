@@ -10,6 +10,7 @@ import com.google.firebase.ai.type.generationConfig
 import com.ultra.assistant.data.AiProviderMode
 import com.ultra.assistant.data.AiSpeedProfile
 import com.ultra.assistant.data.LocalSettingsRepository
+import com.ultra.assistant.data.NetworkMonitor
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
@@ -32,17 +33,24 @@ import java.util.concurrent.TimeUnit
 private const val TAG = "ModelRouter"
 
 class ModelRouter(
-    private val settingsRepository: LocalSettingsRepository
+    private val settingsRepository: LocalSettingsRepository,
+    private val networkMonitor: NetworkMonitor? = null
 ) : AIEngine {
 
+    // Zero HTTP disk cache to minimize storage usage and preserve strict session privacy.
     private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(6, TimeUnit.SECONDS)
-        .readTimeout(18, TimeUnit.SECONDS)
-        .writeTimeout(10, TimeUnit.SECONDS)
+        .cache(null)
+        .connectTimeout(8, TimeUnit.SECONDS)
+        .readTimeout(25, TimeUnit.SECONDS)
+        .writeTimeout(15, TimeUnit.SECONDS)
         .build()
 
     private val _onlineDiagnostic = MutableStateFlow("")
     val onlineDiagnosticFlow: StateFlow<String> = _onlineDiagnostic.asStateFlow()
+
+    fun clearTransientDiagnostic() {
+        _onlineDiagnostic.value = ""
+    }
 
     private val decisionSchema = Schema.obj(
         properties = mapOf(
@@ -58,11 +66,9 @@ class ModelRouter(
                 ),
                 description = "Zero or more ordered tool calls to execute right now"
             ),
-            "memoryTitle" to Schema.string(description = "Optional short user preference/fact title to remember"),
-            "memoryContent" to Schema.string(description = "Optional non-sensitive user preference/fact content"),
             "nextActionNeeded" to Schema.boolean(description = "Set true ONLY if after executing these tools the assistant must observe the newly opened app screen and execute follow-up UI actions")
         ),
-        optionalProperties = listOf("memoryTitle", "memoryContent", "nextActionNeeded")
+        optionalProperties = listOf("nextActionNeeded")
     )
 
     private val defaultGeminiPlanner by lazy { createPlannerModel("gemini-3.8-flash") }
@@ -87,7 +93,7 @@ class ModelRouter(
             text(
                 "You are ULTRA AI, a highly intelligent, analytical, and warm voice + chat assistant combining ChatGPT depth with Jarvis autonomy. " +
                     "For thoughtful, analytical, or multi-part questions, begin with <thought>1-2 concise sentences of logical reasoning</thought> followed immediately by a natural, warm conversational reply in the user's exact language (English, Bengali, Hindi, or mixed Banglish/Hinglish). " +
-                    "Remember prior conversation context and avoid Markdown formatting (no **, #, or code fences) so voice output sounds completely human."
+                    "Remember prior conversation turns from this session and avoid Markdown formatting (no **, #, or code fences) so voice output sounds completely human."
             )
         }
     )
@@ -100,6 +106,11 @@ class ModelRouter(
         screenContext: String,
         languageLabel: String
     ): Result<Pair<String, ReasoningDecision>> {
+        if (networkMonitor != null && !networkMonitor.checkCurrentConnectivity()) {
+            val msg = "No internet connection"
+            _onlineDiagnostic.value = msg
+            return Result.failure(IllegalStateException(msg))
+        }
         val settings = settingsRepository.settingsFlow.first()
         val effectiveModel = resolveEffectiveModel(settings.aiSpeedProfile, settings.geminiModel)
         val timeoutMs = resolveTimeoutMs(settings.aiSpeedProfile)
@@ -110,7 +121,8 @@ class ModelRouter(
             toolCatalogJson = toolCatalogJson,
             screenContext = screenContext,
             languageLabel = languageLabel,
-            speedProfile = settings.aiSpeedProfile
+            speedProfile = settings.aiSpeedProfile,
+            userDisplayName = settings.userDisplayName
         )
 
         return routePlannerCall(
@@ -135,6 +147,11 @@ class ModelRouter(
         toolCatalogJson: String,
         languageLabel: String
     ): Result<Pair<String, ReasoningDecision>> {
+        if (networkMonitor != null && !networkMonitor.checkCurrentConnectivity()) {
+            val msg = "No internet connection"
+            _onlineDiagnostic.value = msg
+            return Result.failure(IllegalStateException(msg))
+        }
         val settings = settingsRepository.settingsFlow.first()
         val effectiveModel = resolveEffectiveModel(settings.aiSpeedProfile, settings.geminiModel)
         val timeoutMs = resolveTimeoutMs(settings.aiSpeedProfile)
@@ -206,6 +223,9 @@ Instructions:
                 if (aiRes.isSuccess) {
                     aiRes
                 } else {
+                    if (networkMonitor != null && !networkMonitor.checkCurrentConnectivity()) {
+                        return aiRes
+                    }
                     callCloudflareWorkerAgent(
                         baseUrl = workerUrl,
                         authToken = workerToken,
@@ -216,7 +236,7 @@ Instructions:
                         languageLabel = languageLabel
                     ).recoverCatching { workerErr ->
                         val aiErr = aiRes.exceptionOrNull()?.message ?: "Firebase AI unavailable"
-                        throw IllegalStateException("Firebase AI: $aiErr | Cloudflare: ${workerErr.message}")
+                        throw IllegalStateException("Online AI temporarily unavailable ($aiErr; Gateway: ${workerErr.message})")
                     }
                 }
             }
@@ -230,7 +250,7 @@ Instructions:
     ): Result<Pair<String, ReasoningDecision>> {
         val firebaseReady = runCatching { FirebaseApp.getInstance() }.isSuccess
         if (!firebaseReady) {
-            val msg = "Firebase not initialized"
+            val msg = "Firebase AI not initialized"
             _onlineDiagnostic.value = msg
             return Result.failure(IllegalStateException(msg))
         }
@@ -243,23 +263,23 @@ Instructions:
             val response = withTimeout(timeoutMs) {
                 model.generateContent(prompt)
             }
-            val rawJson = response.text ?: return Result.failure(IllegalStateException("Gemini returned empty response."))
+            val rawJson = response.text ?: return Result.failure(IllegalStateException("Gemini returned an empty response."))
             val decision = parseDecisionJson(rawJson)
             val label = "Online • $configuredModel"
             _onlineDiagnostic.value = "Connected ($label)"
             Result.success(label to decision)
         } catch (e: TimeoutCancellationException) {
-            val msg = "Gemini timed out after ${timeoutMs / 1000}s"
+            val msg = "Online AI timed out after ${timeoutMs / 1000}s"
             _onlineDiagnostic.value = msg
             Log.e(TAG, msg, e)
             Result.failure(IllegalStateException(msg))
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            val msg = e.localizedMessage ?: "Firebase AI error"
+            val msg = sanitizeOnlineError(e.localizedMessage ?: "Firebase AI error")
             _onlineDiagnostic.value = msg
             Log.e(TAG, "Firebase AI Logic request failed", e)
-            Result.failure(e)
+            Result.failure(IllegalStateException(msg))
         }
     }
 
@@ -302,13 +322,13 @@ Instructions:
             httpClient.newCall(reqBuilder.build()).execute().use { response ->
                 val raw = response.body?.string().orEmpty()
                 if (!response.isSuccessful) {
-                    val err = "Worker HTTP ${response.code}"
-                    _onlineDiagnostic.value = err
-                    return@withContext Result.failure(IllegalStateException(err))
+                    val friendlyErr = parseWorkerError(response.code, raw)
+                    _onlineDiagnostic.value = friendlyErr
+                    return@withContext Result.failure(IllegalStateException(friendlyErr))
                 }
                 val json = JSONObject(raw)
                 if (!json.optBoolean("ok", false)) {
-                    val err = json.optString("error", "Worker error")
+                    val err = sanitizeOnlineError(json.optString("error", "Gateway error"))
                     _onlineDiagnostic.value = err
                     return@withContext Result.failure(IllegalStateException(err))
                 }
@@ -340,10 +360,10 @@ Instructions:
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            val msg = "Cloudflare Worker failed: ${e.message ?: "network error"}"
+            val msg = sanitizeOnlineError("Cloudflare Worker unreachable: ${e.message ?: "network error"}")
             _onlineDiagnostic.value = msg
             Log.w(TAG, msg)
-            Result.failure(e)
+            Result.failure(IllegalStateException(msg))
         }
     }
 
@@ -360,20 +380,20 @@ Instructions:
             httpClient.newCall(reqBuilder.build()).execute().use { response ->
                 val raw = response.body?.string().orEmpty()
                 if (!response.isSuccessful) {
-                    throw IllegalStateException("HTTP ${response.code}: ${raw.take(120)}")
+                    throw IllegalStateException(parseWorkerError(response.code, raw))
                 }
                 val json = JSONObject(raw)
                 val providers = json.optJSONObject("providers")
                 val summary = if (providers != null) {
                     "Workers AI=${providers.optBoolean("workersAi")}, Gemini=${providers.optBoolean("gemini")}, OpenAI=${providers.optBoolean("openai")}"
                 } else {
-                    raw.take(120)
+                    json.optString("service", "Healthy")
                 }
                 _onlineDiagnostic.value = "Health OK ($summary)"
                 "Cloudflare Gateway Ready • $summary"
             }
         }.onFailure { err ->
-            _onlineDiagnostic.value = err.message ?: "Health check failed"
+            _onlineDiagnostic.value = sanitizeOnlineError(err.message ?: "Health check failed")
         }
     }
 
@@ -382,6 +402,11 @@ Instructions:
         history: List<Pair<String, String>>,
         languageLabel: String
     ): Flow<String> = flow {
+        if (networkMonitor != null && !networkMonitor.checkCurrentConnectivity()) {
+            val msg = "No internet connection"
+            _onlineDiagnostic.value = msg
+            throw IllegalStateException(msg)
+        }
         val settings = settingsRepository.settingsFlow.first()
         val effectiveModel = resolveEffectiveModel(settings.aiSpeedProfile, settings.geminiModel)
         val timeoutMs = resolveTimeoutMs(settings.aiSpeedProfile)
@@ -418,7 +443,9 @@ Instructions:
             throw e
         } catch (e: Exception) {
             Log.w(TAG, "Streaming via Firebase AI failed, checking fallback", e)
-            if (settings.aiProviderMode == AiProviderMode.AUTO) {
+            if (settings.aiProviderMode == AiProviderMode.AUTO &&
+                (networkMonitor == null || networkMonitor.checkCurrentConnectivity())
+            ) {
                 val workerRes = callCloudflareWorkerAgent(
                     baseUrl = settings.workerEndpoint,
                     authToken = settings.workerAuthToken,
@@ -472,17 +499,35 @@ Instructions:
     }
 
     private fun resolveEffectiveModel(profile: AiSpeedProfile, savedModel: String): String {
-        return when {
-            savedModel.isBlank() -> profile.modelId
-            savedModel in listOf("gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-4-argon") -> profile.modelId
-            else -> savedModel
-        }
+        return if (savedModel.isNotBlank()) savedModel else profile.modelId
     }
 
     private fun resolveTimeoutMs(profile: AiSpeedProfile): Long = when (profile) {
-        AiSpeedProfile.TURBO -> 15_000L
-        AiSpeedProfile.BALANCED -> 22_000L
-        AiSpeedProfile.DEEP_THINK -> 38_000L
+        AiSpeedProfile.TURBO -> 30_000L
+        AiSpeedProfile.BALANCED -> 45_000L
+        AiSpeedProfile.DEEP_THINK -> 60_000L
+    }
+
+    private fun parseWorkerError(code: Int, rawBody: String): String {
+        val jsonMsg = runCatching {
+            val obj = JSONObject(rawBody)
+            val err = obj.optString("error").trim()
+            val detail = obj.optString("provider_message").ifBlank { obj.optString("detail") }.trim()
+            val pCode = obj.optString("provider_code").trim()
+            when {
+                pCode == "credit_balance_exhausted" || code == 429 ->
+                    "Cloudflare gateway quota exhausted (HTTP $code)"
+                err.isNotBlank() && detail.isNotBlank() -> "$err: ${detail.take(90)}"
+                err.isNotBlank() -> "$err (HTTP $code)"
+                else -> "Gateway HTTP $code"
+            }
+        }.getOrNull()
+        return sanitizeOnlineError(jsonMsg ?: "Gateway HTTP $code")
+    }
+
+    private fun sanitizeOnlineError(raw: String): String {
+        val clean = raw.replace(Regex("\\s+"), " ").trim()
+        return clean.take(140).ifBlank { "Online connection error" }
     }
 
     private fun parseDecisionJson(rawJson: String): ReasoningDecision {
@@ -506,8 +551,8 @@ Instructions:
             thoughtSummary = json.optString("thoughtSummary", ""),
             directReply = json.optString("reply", "").trim().ifBlank { "Ready." },
             plannedTools = toolCalls,
-            memoryCandidateTitle = json.optString("memoryTitle", "").trim(),
-            memoryCandidateContent = json.optString("memoryContent", "").trim(),
+            memoryCandidateTitle = "",
+            memoryCandidateContent = "",
             nextActionNeeded = json.optBoolean("nextActionNeeded", false)
         )
     }
@@ -532,9 +577,11 @@ Instructions:
         toolCatalogJson: String,
         screenContext: String,
         languageLabel: String,
-        speedProfile: AiSpeedProfile
+        speedProfile: AiSpeedProfile,
+        userDisplayName: String
     ): String {
         val historyBlock = if (history.isEmpty()) "None" else history.takeLast(10).joinToString("\n") { "${it.first}: ${it.second}" }
+        val userNameNote = if (userDisplayName.isNotBlank()) "User's given name: $userDisplayName\n" else ""
         val reasoningInstruction = when (speedProfile) {
             AiSpeedProfile.TURBO -> "Reason crisply and respond rapidly."
             AiSpeedProfile.BALANCED -> "Think analytically and verify dependencies before acting."
@@ -542,21 +589,20 @@ Instructions:
         }
         return """
 You are ULTRA AI, a warm, intelligent, human-like Android assistant and autonomous Jarvis task agent similar to ChatGPT.
-Preferred language: $languageLabel (respond naturally in Bengali, Hindi, English, or Banglish matching the user; avoid Markdown symbols like ** or # so voice playback sounds natural).
+${userNameNote}Preferred language: $languageLabel (respond naturally in Bengali, Hindi, English, or Banglish matching the user; avoid Markdown symbols like ** or # so voice playback sounds natural).
 $reasoningInstruction
-For tasks inside an app (e.g. "open YouTube and search...", "open WhatsApp and tap...", "open Settings and turn on..."):
-- First call `open_app` (or `open_device_settings`) AND set `nextActionNeeded = true` so ULTRA AI waits for the app window, inspects Accessibility nodes, and executes the follow-up clicks/typing autonomously!
+For tasks inside an app (e.g. "open YouTube and search...", "open Facebook and scroll...", "open Settings and turn on..."):
+- First call `open_app` (or `open_device_settings`) AND set `nextActionNeeded = true` so ULTRA AI waits for the app window, inspects Accessibility nodes, and executes the follow-up clicks/typing/scrolling autonomously.
 - For direct YouTube video queries where fast deep-link works, `search_youtube` may also be used.
 Never claim you completed a device action unless you schedule the corresponding tool in toolCalls.
-Do not store sensitive OTPs, passwords, or private SMS/notification contents in memoryTitle/memoryContent.
 
-Active Memories:
+Temporary Session Context:
 $memoryContext
 
 Current Screen Context:
 $screenContext
 
-Recent Conversation:
+Recent Session Conversation:
 $historyBlock
 
 Available Registered Tools (JSON):

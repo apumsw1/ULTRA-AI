@@ -71,6 +71,7 @@ fun VoiceScreen(
     lastAgentReply: String,
     streamingReply: String,
     isOnline: Boolean,
+    isReconnecting: Boolean,
     settings: UltraSettings,
     onStartVoice: () -> Unit,
     onStopVoice: () -> Unit,
@@ -125,8 +126,16 @@ fun VoiceScreen(
                         )
                     }
                     StatusPill(
-                        label = if (effectiveOffline) "OFFLINE VOICE" else "ONLINE VOICE",
-                        color = if (effectiveOffline) AmberWarning else EmeraldVerified
+                        label = when {
+                            isReconnecting -> "RECONNECTING"
+                            effectiveOffline -> "OFFLINE VOICE"
+                            else -> "ONLINE VOICE"
+                        },
+                        color = when {
+                            isReconnecting -> ArcCyan
+                            effectiveOffline -> AmberWarning
+                            else -> EmeraldVerified
+                        }
                     )
                 }
 

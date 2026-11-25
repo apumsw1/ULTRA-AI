@@ -65,7 +65,18 @@ class BrowserController(context: Context) {
         val clean = query.trim()
         if (clean.isBlank()) return Result.failure(IllegalArgumentException("Music query cannot be empty."))
         val url = "https://music.youtube.com/search?q=" + URLEncoder.encode(clean, "UTF-8")
-        return openUrl(url)
+        val ytmIntent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+            setPackage("com.google.android.apps.youtube.music")
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        return runCatching {
+            if (ytmIntent.resolveActivity(appContext.packageManager) != null) {
+                appContext.startActivity(ytmIntent)
+                url
+            } else {
+                openUrl(url).getOrThrow()
+            }
+        }
     }
 
     private fun normalizeSafeHttpUrl(input: String): String? {

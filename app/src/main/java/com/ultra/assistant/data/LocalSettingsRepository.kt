@@ -51,6 +51,7 @@ enum class UltraThemeStyle(val label: String) {
 }
 
 data class UltraSettings(
+    val userDisplayName: String = "",
     val language: String = "English",
     val languageAutoDetect: Boolean = true,
     val wakePhrase: String = "Hey Ultra",
@@ -70,9 +71,9 @@ data class UltraSettings(
     val floatingAssistantEnabled: Boolean = false,
     val continuousListening: Boolean = true,
     val ambientEdgeGlowEnabled: Boolean = true,
-    val cloudSyncEnabled: Boolean = true,
-    val encryptCloudMemory: Boolean = true,
-    val memoryTtlDays: Int = 30,
+    val cloudSyncEnabled: Boolean = false,
+    val encryptCloudMemory: Boolean = false,
+    val memoryTtlDays: Int = 1,
     val allowNotificationContext: Boolean = false,
     val requireSmsConfirmation: Boolean = true,
     val requireCallConfirmation: Boolean = true,
@@ -89,6 +90,12 @@ class LocalSettingsRepository(context: Context) {
     private val prefs = appContext.getSharedPreferences("ultra_local_settings", Context.MODE_PRIVATE)
 
     // Synchronous accessors preserved for VoiceAssistantService & Broadcast/Overlay updates
+    fun userDisplayName(): String = prefs.getString("user_display_name", "")?.trim().orEmpty()
+
+    fun setUserDisplayNameSync(name: String) {
+        prefs.edit().putString("user_display_name", name.trim().take(60)).apply()
+    }
+
     fun language(): String = prefs.getString("language", "English") ?: "English"
 
     fun setLanguage(v: String) {
@@ -115,6 +122,8 @@ class LocalSettingsRepository(context: Context) {
 
     fun ambientEdgeGlowEnabled(): Boolean = prefs.getBoolean("ambient_edge_glow", true)
 
+    fun batteryConsciousListening(): Boolean = prefs.getBoolean("battery_conscious_listening", true)
+
     fun operatingMode(): AiOperatingMode =
         enumValues<AiOperatingMode>().firstOrNull { it.name == prefs.getString("operating_mode", AiOperatingMode.AUTO.name) }
             ?: AiOperatingMode.AUTO
@@ -137,10 +146,20 @@ class LocalSettingsRepository(context: Context) {
         parseSettings(data)
     }
 
+    suspend fun updateUserDisplayName(name: String) {
+        val clean = name.trim().take(60)
+        updateSettings { it.copy(userDisplayName = clean) }
+    }
+
     suspend fun updateSettings(transform: (UltraSettings) -> UltraSettings) {
         appContext.ultraDataStore.edit { data ->
             val current = parseSettings(data)
-            val next = transform(current)
+            val next = transform(current).copy(
+                cloudSyncEnabled = false,
+                encryptCloudMemory = false
+            )
+            val cleanName = next.userDisplayName.trim().take(60)
+            data[KEY_USER_DISPLAY_NAME] = cleanName
             data[KEY_LANGUAGE] = next.language
             data[KEY_LANGUAGE_AUTO_DETECT] = next.languageAutoDetect
             data[KEY_WAKE_PHRASE] = next.wakePhrase.trim().ifBlank { "Hey Ultra" }
@@ -160,8 +179,8 @@ class LocalSettingsRepository(context: Context) {
             data[KEY_FLOATING_ASSISTANT] = next.floatingAssistantEnabled
             data[KEY_CONTINUOUS_LISTENING] = next.continuousListening
             data[KEY_AMBIENT_EDGE_GLOW] = next.ambientEdgeGlowEnabled
-            data[KEY_CLOUD_SYNC] = next.cloudSyncEnabled
-            data[KEY_ENCRYPT_CLOUD] = next.encryptCloudMemory
+            data[KEY_CLOUD_SYNC] = false
+            data[KEY_ENCRYPT_CLOUD] = false
             data[KEY_MEMORY_TTL_DAYS] = next.memoryTtlDays.coerceIn(1, 365)
             data[KEY_ALLOW_NOTIF_CTX] = next.allowNotificationContext
             data[KEY_REQUIRE_SMS_CONFIRM] = next.requireSmsConfirmation
@@ -170,6 +189,7 @@ class LocalSettingsRepository(context: Context) {
             data[KEY_BATTERY_CONSCIOUS] = next.batteryConsciousListening
 
             prefs.edit()
+                .putString("user_display_name", cleanName)
                 .putString("language", next.language)
                 .putBoolean("language_auto_detect", next.languageAutoDetect)
                 .putString("wake_phrase", next.wakePhrase.trim().ifBlank { "Hey Ultra" })
@@ -181,6 +201,7 @@ class LocalSettingsRepository(context: Context) {
                 .putBoolean("continuous_listening", next.continuousListening)
                 .putBoolean("floating_assistant", next.floatingAssistantEnabled)
                 .putBoolean("ambient_edge_glow", next.ambientEdgeGlowEnabled)
+                .putBoolean("battery_conscious_listening", next.batteryConsciousListening)
                 .apply()
         }
     }
@@ -199,6 +220,7 @@ class LocalSettingsRepository(context: Context) {
         val theme = enumValues<UltraThemeStyle>().firstOrNull { it.name == data[KEY_THEME_STYLE] }
             ?: UltraThemeStyle.CYBER_CYAN
         return UltraSettings(
+            userDisplayName = (data[KEY_USER_DISPLAY_NAME] ?: userDisplayName()).trim().take(60),
             language = data[KEY_LANGUAGE] ?: language(),
             languageAutoDetect = data[KEY_LANGUAGE_AUTO_DETECT] ?: languageAutoDetect(),
             wakePhrase = data[KEY_WAKE_PHRASE] ?: wakePhrase(),
@@ -218,9 +240,9 @@ class LocalSettingsRepository(context: Context) {
             floatingAssistantEnabled = data[KEY_FLOATING_ASSISTANT] ?: floatingAssistantEnabled(),
             continuousListening = data[KEY_CONTINUOUS_LISTENING] ?: continuousListening(),
             ambientEdgeGlowEnabled = data[KEY_AMBIENT_EDGE_GLOW] ?: ambientEdgeGlowEnabled(),
-            cloudSyncEnabled = data[KEY_CLOUD_SYNC] ?: true,
-            encryptCloudMemory = data[KEY_ENCRYPT_CLOUD] ?: true,
-            memoryTtlDays = (data[KEY_MEMORY_TTL_DAYS] ?: 30).coerceIn(1, 365),
+            cloudSyncEnabled = false,
+            encryptCloudMemory = false,
+            memoryTtlDays = (data[KEY_MEMORY_TTL_DAYS] ?: 1).coerceIn(1, 365),
             allowNotificationContext = data[KEY_ALLOW_NOTIF_CTX] ?: false,
             requireSmsConfirmation = data[KEY_REQUIRE_SMS_CONFIRM] ?: true,
             requireCallConfirmation = data[KEY_REQUIRE_CALL_CONFIRM] ?: true,
@@ -230,6 +252,7 @@ class LocalSettingsRepository(context: Context) {
     }
 
     private companion object {
+        val KEY_USER_DISPLAY_NAME = stringPreferencesKey("user_display_name")
         val KEY_LANGUAGE = stringPreferencesKey("language")
         val KEY_LANGUAGE_AUTO_DETECT = booleanPreferencesKey("language_auto_detect")
         val KEY_WAKE_PHRASE = stringPreferencesKey("wake_phrase")

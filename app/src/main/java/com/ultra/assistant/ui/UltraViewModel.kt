@@ -77,6 +77,7 @@ class UltraViewModel(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UltraSettings())
 
     val isOnline: StateFlow<Boolean> = networkMonitor.isOnline
+    val isReconnecting: StateFlow<Boolean> = networkMonitor.isReconnecting
 
     val memories: StateFlow<List<MemoryRecordEntity>> = memoryManager.memoriesFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), emptyList())
@@ -95,17 +96,9 @@ class UltraViewModel(
     val automationRules: StateFlow<List<AutomationRuleEntity>> = memoryManager.automationRulesFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), emptyList())
 
+    // Cloud memory sync is permanently disabled per strict privacy rules.
     val cloudMemoriesState: StateFlow<UiState<List<SyncedMemory>>> =
-        cloudSyncRepository.observeMemories(currentUserId)
-            .map<List<SyncedMemory>, UiState<List<SyncedMemory>>> { UiState.Success(it) }
-            .catch { error ->
-                val firestoreError = generateSequence(error) { it.cause }
-                    .filterIsInstance<com.google.firebase.firestore.FirebaseFirestoreException>()
-                    .firstOrNull()
-                if (firestoreError == null && error is CancellationException) throw error
-                emit(UiState.Error((firestoreError ?: error).localizedMessage ?: "Cloud sync unavailable"))
-            }
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
+        MutableStateFlow<UiState<List<SyncedMemory>>>(UiState.Success(emptyList())).asStateFlow()
 
     val latestAgentReport: StateFlow<AgentExecutionReport?> = agentManager.latestReportFlow
     val pendingConfirmation: StateFlow<PendingToolConfirmation?> = agentManager.pendingConfirmationFlow
@@ -140,6 +133,15 @@ class UltraViewModel(
 
     init {
         refreshSystemState()
+        viewModelScope.launch {
+            var wasOnline = networkMonitor.isOnline.value
+            networkMonitor.isOnline.collect { nowOnline ->
+                if (!wasOnline && nowOnline) {
+                    agentManager.modelRouter.clearTransientDiagnostic()
+                }
+                wasOnline = nowOnline
+            }
+        }
     }
 
     fun refreshSystemState() {
@@ -301,14 +303,26 @@ class UltraViewModel(
         }
     }
 
+    fun updateUserDisplayName(name: String) {
+        val clean = name.trim().take(60)
+        viewModelScope.launch {
+            settingsRepository.updateUserDisplayName(clean)
+            _statusBanner.value = if (clean.isBlank()) {
+                "Saved name cleared."
+            } else {
+                "Saved your name: $clean"
+            }
+        }
+    }
+
     fun saveMemoryManual(title: String, content: String) {
         if (title.isBlank() || content.isBlank()) return
         viewModelScope.launch {
-            val saved = memoryManager.saveMemory("KNOWLEDGE", title, content, source = "user")
+            val saved = memoryManager.saveMemory("SESSION_NOTE", title, content, source = "user")
             _statusBanner.value = if (saved) {
-                "Memory saved."
+                "Added temporary session note (clears when app closes)."
             } else {
-                "Blocked by Privacy Guard: sensitive credentials or OTPs cannot be saved."
+                "Blocked by Privacy Guard: sensitive credentials or OTPs cannot be stored."
             }
         }
     }
@@ -319,9 +333,9 @@ class UltraViewModel(
 
     fun clearAllMemories() {
         viewModelScope.launch {
-            memoryManager.clearAllMemories()
-            memoryManager.clearConversationHistory()
-            _statusBanner.value = "All AI memories and conversation history cleared."
+            memoryManager.clearTemporaryContext()
+            agentManager.contextManager.clearTemporaryContext()
+            _statusBanner.value = "Temporary session chats & notes cleared."
         }
     }
 

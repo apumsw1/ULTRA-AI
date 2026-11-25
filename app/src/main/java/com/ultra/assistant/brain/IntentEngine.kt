@@ -21,7 +21,8 @@ class IntentEngine {
                 norm,
                 "volume", "mute", "unmute", "pause music", "play music", "resume music",
                 "next song", "previous song", "flashlight", "torch",
-                "ভলিউম", "ফ্ল্যাশলাইট", "টর্চ", "वॉल्यूम", "फ्लैशलाइट"
+                "ভলিউম", "ফ্ল্যাশলাইট", "টর্চ", "পরের গান", "আগের গান", "গান থামাও", "গান চালাও",
+                "वॉल्यूम", "फ्लैशलाइट", "अगला गाना", "पिछला गाना"
             ) -> IntentCategory.DEVICE_CONTROL
             containsAny(norm, "call ", "dial ", "phone ", "কল কর", "ফোন কর", "कॉल कर", "फ़ोन कर") ->
                 IntentCategory.PHONE_CALL
@@ -36,13 +37,13 @@ class IntentEngine {
             containsAny(
                 norm,
                 "click ", "tap ", "type ", "scroll", "go back", "press back", "go home",
-                "home screen", "recent apps", "ক্লিক", "টাইপ", "ব্যাক", "स्क्रॉल"
+                "home screen", "recent apps", "ক্লিক", "টাইপ", "ব্যাক", "স্ক্রল", "হোম", "स्क्रॉल", "होम", "बैक"
             ) -> IntentCategory.SCREEN_ACTION
             containsAny(norm, "remember that", "মনে রাখ", "याद रखना", "याद रखो") ->
                 IntentCategory.MEMORY_SAVE
             containsAny(norm, "search youtube", "youtube for", "ইউটিউবে সার্চ", "ইউটিউব সার্চ", "यूट्यूब पर खोजो", "यूट्यूब सर्च") ->
                 IntentCategory.YOUTUBE_SEARCH
-            containsAny(norm, "গান", "song", "music", "youtube music") ->
+            containsAny(norm, "গান", "song", "music", "youtube music", "गाना") ->
                 IntentCategory.MUSIC_SEARCH
             CommandParser.isSearch(norm) ->
                 IntentCategory.WEB_SEARCH
@@ -63,12 +64,48 @@ class IntentEngine {
             return when {
                 input.any { it in '\u0980'..'\u09FF' } -> "bn"
                 input.any { it in '\u0900'..'\u097F' } -> "hi"
-                // Detect common Banglish / romanized Bengali cues when user writes in Latin script
-                listOf("kholo", "koro", "kore", "korbo", "bhalo", "amar", "tumi", "kemone", "kemon").any {
+                listOf("kholo", "koro", "kore", "korbo", "bhalo", "amar", "tumi", "kemone", "kemon", "thamo", "naam").any {
                     Regex("\\b$it\\b").containsMatchIn(lower)
                 } -> "bn"
                 else -> "en"
             }
+        }
+
+        fun isStopCommand(input: String): Boolean {
+            val trimmed = input.trim().lowercase()
+                .trimEnd('.', '!', '?', '।')
+            if (trimmed.isBlank()) return false
+            val exact = setOf(
+                "stop", "stop speaking", "stop talking", "be quiet", "shut up", "quiet",
+                "stop listening", "cancel", "abort", "halt",
+                "থামো", "থাম", "চুপ করো", "চুপ", "বন্ধ করো", "থামিয়ে দাও", "বাতিল করো",
+                "রুকো", "रुको", "बंद करो", "चुप रहो", "chup koro", "thamo"
+            )
+            return trimmed in exact ||
+                trimmed.startsWith("stop ultra") ||
+                trimmed.startsWith("ultra stop")
+        }
+
+        fun extractUserNameDeclaration(input: String): String? {
+            val trimmed = input.trim()
+            val patterns = listOf(
+                Regex("^(?:my name is|call me|i am)\\s+([\\p{L}\\p{M}][\\p{L}\\p{M}\\s'.-]{0,40})$", RegexOption.IGNORE_CASE),
+                Regex("^(?:আমার নাম|আমাকে)\\s+([\\p{L}\\p{M}][\\p{L}\\p{M}\\s'.-]{0,40}?)(?:\\s+(?:হয়|হলো|বলো|ডাকো|বলে ডাকো))?$", RegexOption.IGNORE_CASE),
+                Regex("^(?:मेरा नाम|मुझे)\\s+([\\p{L}\\p{M}][\\p{L}\\p{M}\\s'.-]{0,40}?)(?:\\s+(?:है|कहें|बोलो))?$", RegexOption.IGNORE_CASE)
+            )
+            for (pattern in patterns) {
+                val match = pattern.find(trimmed) ?: continue
+                val candidate = match.groupValues[1]
+                    .trim()
+                    .trimEnd('.', '!', '?', '।', ',')
+                if (candidate.isNotBlank() &&
+                    candidate.split(Regex("\\s+")).size <= 4 &&
+                    !candidate.contains("ultra", ignoreCase = true)
+                ) {
+                    return candidate
+                }
+            }
+            return null
         }
 
         fun normalizeSpeechTranscript(input: String): String {
@@ -97,8 +134,8 @@ class IntentEngine {
             val hasSecondaryVerb = listOf(
                 " and ", " then ", " after that ", " search ", " type ", " click ", " tap ",
                 " play ", " scroll ", " send ", " message ", " message to ",
-                " করে ", " সার্চ", " টাইপ", " ক্লিক", " লিখে", " এবং ", " তারপর ",
-                " और ", " फिर ", " सर्च", " टाइप"
+                " করে ", " সার্চ", " টাইপ", " ক্লিক", " লিখে", " এবং ", " তারপর ", " স্ক্রল",
+                " और ", " फिर ", " सर्च", " टाइप", " स्क्रॉल"
             ).any { lower.contains(it) }
             val hasTwoScreenActions = listOf("click ", "tap ", "type ", "scroll ").count { lower.contains(it) } >= 2
             return (hasOpenOrLaunch && hasSecondaryVerb) || hasTwoScreenActions

@@ -16,7 +16,7 @@ class ReasoningEngine(
     memoryManager: MemoryManager
 ) {
     private val screenController = ScreenController(context.applicationContext)
-    private val offlineEngine = OfflineAssistantEngine(context.applicationContext, memoryManager)
+    private val offlineEngine = OfflineAssistantEngine(context.applicationContext, memoryManager, settingsRepository)
 
     suspend fun isEffectiveOffline(): Boolean {
         val settings = settingsRepository.settingsFlow.first()
@@ -70,24 +70,28 @@ class ReasoningEngine(
             // If online planner fails, fall back cleanly to local compound or offline engine without double waiting
             val localFallback = localFastPath(userInput, intent) ?: if (isCompound) buildOfflineCompoundDecision(userInput) else null
             if (localFallback != null) {
-                return "Local Fallback Agent" to localFallback
+                return "Offline Fallback • Local Agent" to localFallback
             }
             val offlineFallback = offlineEngine.respond(userInput, intent, null)
             val errDetail = err.localizedMessage ?: "connection error"
-            val combinedReply = if (settings.operatingMode == AiOperatingMode.ONLINE) {
-                when (intent.detectedLanguage) {
-                    "bn" -> "অনলাইন AI-এর সাথে সংযোগ করতে সমস্যা হয়েছে ($errDetail)। নেটওয়ার্ক বা Cloudflare সেটিংস চেক করুন।"
+            if (settings.operatingMode == AiOperatingMode.ONLINE) {
+                val errReply = when (intent.detectedLanguage) {
+                    "bn" -> "অনলাইন AI-এর সাথে সংযোগ করা যায়নি ($errDetail)। ইন্টারনেট বা Settings > AI Gateway পরীক্ষা করুন।"
                     "hi" -> "ऑनलाइन AI से जुड़ने में समस्या हुई ($errDetail)।"
-                    else -> "Online AI could not be reached ($errDetail). Check internet or Settings > Cloudflare/Gemini."
+                    else -> "Online AI could not be reached ($errDetail). Check internet or Settings > AI Gateway."
                 }
+                "Online Error • $errDetail" to ReasoningDecision(
+                    thoughtSummary = "Online AI failed: ${err.message}",
+                    directReply = errReply,
+                    plannedTools = emptyList()
+                )
             } else {
-                offlineFallback.second.directReply
+                "Offline Fallback • Local Assistant" to ReasoningDecision(
+                    thoughtSummary = "Auto fallback to Offline Engine after online error: $errDetail",
+                    directReply = offlineFallback.second.directReply,
+                    plannedTools = offlineFallback.second.plannedTools
+                )
             }
-            "Online Error ($errDetail)" to ReasoningDecision(
-                thoughtSummary = "Online AI failed: ${err.message}",
-                directReply = combinedReply,
-                plannedTools = emptyList()
-            )
         }
     }
 
@@ -239,11 +243,14 @@ class ReasoningEngine(
                         )
                     }
                     lower.contains("pause music") || lower.contains("play music") || lower.contains("resume music") ||
-                        lower.contains("next song") || lower.contains("previous song") -> {
+                        lower.contains("next song") || lower.contains("previous song") ||
+                        lower.contains("পরের গান") || lower.contains("আগের গান") ||
+                        lower.contains("গান থামাও") || lower.contains("গান চালাও") ||
+                        lower.contains("अगला गाना") || lower.contains("पिछला गाना") -> {
                         val cmd = when {
-                            lower.contains("pause") -> "pause"
-                            lower.contains("next") -> "next"
-                            lower.contains("previous") -> "previous"
+                            lower.contains("pause") || lower.contains("থামা") -> "pause"
+                            lower.contains("next") || lower.contains("পরের") || lower.contains("अगला") -> "next"
+                            lower.contains("previous") || lower.contains("আগের") || lower.contains("पिछला") -> "previous"
                             else -> "play_pause"
                         }
                         ReasoningDecision(
@@ -372,7 +379,7 @@ class ReasoningEngine(
             )
             IntentCategory.SCREEN_ACTION -> {
                 when {
-                    lower.contains("home") -> ReasoningDecision(
+                    lower.contains("home") || lower.contains("হোম") || lower.contains("होम") -> ReasoningDecision(
                         "Navigate home",
                         "Going to the home screen.",
                         listOf(PlannedToolCall("navigate_system", mapOf("action" to "home"), "Global home action"))
@@ -382,17 +389,17 @@ class ReasoningEngine(
                         "Showing recent apps.",
                         listOf(PlannedToolCall("navigate_system", mapOf("action" to "recents"), "Global recents action"))
                     )
-                    lower.contains("back") || lower.contains("ব্যাক") -> ReasoningDecision(
+                    lower.contains("back") || lower.contains("ব্যাক") || lower.contains("बैक") -> ReasoningDecision(
                         "Global back navigation",
                         "Going back.",
                         listOf(PlannedToolCall("press_back", emptyMap(), "Perform Accessibility GLOBAL_ACTION_BACK"))
                     )
-                    lower.contains("scroll up") || lower.contains("ऊपर") -> ReasoningDecision(
+                    lower.contains("scroll up") || lower.contains("উপরে স্ক্রল") || lower.contains("স্ক্রল উপরে") || lower.contains("ऊपर") -> ReasoningDecision(
                         "Scroll up",
                         "Scrolling up.",
                         listOf(PlannedToolCall("scroll_screen", mapOf("direction" to "up"), "Scroll backward"))
                     )
-                    lower.contains("scroll") || lower.contains("स्क्रॉल") -> ReasoningDecision(
+                    lower.contains("scroll") || lower.contains("স্ক্রল") || lower.contains("स्क्रॉल") -> ReasoningDecision(
                         "Scroll down",
                         "Scrolling down.",
                         listOf(PlannedToolCall("scroll_screen", mapOf("direction" to "down"), "Scroll forward"))

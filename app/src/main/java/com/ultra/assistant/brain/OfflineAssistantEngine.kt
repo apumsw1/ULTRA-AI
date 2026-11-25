@@ -5,6 +5,7 @@ import android.content.Context
 import android.os.Environment
 import android.os.StatFs
 import com.ultra.assistant.control.MediaVolumeController
+import com.ultra.assistant.data.LocalSettingsRepository
 import com.ultra.assistant.memory.MemoryManager
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -14,11 +15,12 @@ import java.util.Locale
  * Genuine on-device Offline Assistant Engine.
  * Handles local commands, reminders, device info (battery, RAM, storage),
  * time/date, percentages, unit conversions, recursive-descent math,
- * local memory recall/saving, and transparent offline capability messaging.
+ * user given name persistence, temporary session notes, and transparent offline capability messaging.
  */
 class OfflineAssistantEngine(
     context: Context,
-    private val memoryManager: MemoryManager
+    private val memoryManager: MemoryManager,
+    private val settingsRepository: LocalSettingsRepository = LocalSettingsRepository(context)
 ) {
     private val appContext = context.applicationContext
     private val mediaController = MediaVolumeController(appContext)
@@ -35,50 +37,86 @@ class OfflineAssistantEngine(
         val trimmed = userInput.trim()
         val lower = trimmed.lowercase()
 
-        // 1. Save memory locally
+        // 0. User given name declaration or query (ONLY permanent personal field)
+        IntentEngine.extractUserNameDeclaration(trimmed)?.let { declaredName ->
+            settingsRepository.updateUserDisplayName(declaredName)
+            val reply = localized(
+                intent.detectedLanguage,
+                en = "Nice to meet you, $declaredName! I'll remember your name.",
+                bn = "পরিচিত হয়ে ভালো লাগলো, $declaredName! আমি শুধু আপনার নামটিই মনে রাখবো।",
+                hi = "आपसे मिलकर खुशी हुई, $declaredName! मैं आपका नाम याद रखूँगा।"
+            )
+            return "Offline • Profile" to ReasoningDecision("Saved user display name", reply, emptyList())
+        }
+
+        if (lower.contains("what is my name") || lower.contains("who am i") ||
+            lower.contains("আমার নাম কী") || lower.contains("আমার নাম কি") || lower.contains("मेरा नाम क्या है")
+        ) {
+            val savedName = settingsRepository.userDisplayName()
+            val reply = if (savedName.isNotBlank()) {
+                localized(
+                    intent.detectedLanguage,
+                    en = "Your name is $savedName.",
+                    bn = "আপনার নাম $savedName।",
+                    hi = "आपका नाम $savedName है।"
+                )
+            } else {
+                localized(
+                    intent.detectedLanguage,
+                    en = "You haven't told me your name yet. Say \"My name is ...\" anytime.",
+                    bn = "আপনি এখনো আপনার নাম বলেননি। চাইলে \"আমার নাম ...\" বলতে পারেন।",
+                    hi = "आपने अभी अपना नाम नहीं बताया है। आप \"मेरा नाम ...\" कह सकते हैं।"
+                )
+            }
+            return "Offline • Profile" to ReasoningDecision("Checked saved user display name", reply, emptyList())
+        }
+
+        // 1. Save temporary session note (RAM-only, cleared when app closes)
         if (intent.category == IntentCategory.MEMORY_SAVE) {
             val fact = trimmed
                 .replace(Regex("^(please\\s+)?(remember that|remember|মনে রাখো|মনে রাখ|याद रखो|याद रखना)\\s*", RegexOption.IGNORE_CASE), "")
                 .trim()
             if (fact.isNotBlank()) {
-                val saved = memoryManager.saveMemory("PREFERENCE", "Offline Note", fact, source = "user")
+                val saved = memoryManager.saveMemory("SESSION_NOTE", "Session Note", fact, source = "user")
                 val reply = if (saved) {
                     localized(intent.detectedLanguage,
-                        en = "Got it. I've saved that locally: \"$fact\".",
-                        bn = "ঠিক আছে, আমি এটা লোকালি মনে রেখেছি: \"$fact\"।",
-                        hi = "ठीक है, मैंने इसे लोकल मेमोरी में सहेज लिया है: \"$fact\"।"
+                        en = "Got it for this session: \"$fact\". It will clear automatically when you close the app.",
+                        bn = "ঠিক আছে, শুধু এই সেশনের জন্য মনে রাখলাম: \"$fact\"। অ্যাপ বন্ধ করলে এটি মুছে যাবে।",
+                        hi = "ठीक है, इस सेशन के लिए याद रखा है: \"$fact\"। ऐप बंद होने पर यह हट जाएगा।"
                     )
                 } else {
                     localized(intent.detectedLanguage,
-                        en = "For your privacy, I can't save sensitive passwords, OTPs, or tokens in memory.",
-                        bn = "নিরাপত্তার জন্য পাসওয়ার্ড বা ওটিপি মেমোরিতে সংরক্ষণ করা হয় না।",
-                        hi = "सुरक्षा के लिए पासवर्ड या ओटीपी मेमोरी में सहेजे नहीं जाते हैं।"
+                        en = "For your privacy, sensitive passwords, OTPs, or tokens are never saved.",
+                        bn = "নিরাপত্তার জন্য পাসওয়ার্ড বা ওটিপি কখনো সংরক্ষণ করা হয় না।",
+                        hi = "सुरक्षा के लिए पासवर्ड या ओटीपी कभी सहेजे नहीं जाते हैं।"
                     )
                 }
-                return "Offline • Local Memory" to ReasoningDecision("Saved local memory note", reply, emptyList())
+                return "Offline • Session Context" to ReasoningDecision("Stored temporary session note", reply, emptyList())
             }
         }
 
-        // 2. Recall local memories
+        // 2. Recall temporary session notes
         if (lower.contains("what do you remember") || lower.contains("my memories") ||
             lower.contains("কী মনে আছে") || lower.contains("क्या याद है")
         ) {
             val memories = memoryManager.getPromptContextMemories(5)
+            val savedName = settingsRepository.userDisplayName()
             val reply = if (memories.isEmpty()) {
+                val nameNote = if (savedName.isNotBlank()) " I know your name is $savedName." else ""
                 localized(intent.detectedLanguage,
-                    en = "I don't have any saved memories yet. You can say \"Remember that...\" anytime.",
-                    bn = "এখনও কোনো মেমোরি সেভ করা নেই। চাইলে \"মনে রাখো...\" বলতে পারেন।",
-                    hi = "अभी कोई मेमोरी सहेजी नहीं गई है। आप कभी भी \"याद रखो...\" कह सकते हैं।"
+                    en = "No temporary session notes yet.$nameNote Chats and notes stay in RAM only and clear when you close the app.",
+                    bn = "এই সেশনে কোনো অস্থায়ী নোট নেই। চ্যাট ও নোট স্থায়ীভাবে সেভ হয় না—অ্যাপ বন্ধ করলেই মুছে যায়।",
+                    hi = "इस सेशन में अभी कोई अस्थायी नोट नहीं है। ऐप बंद करने पर चैट और संदर्भ स्वतः साफ हो जाते हैं।"
                 )
             } else {
-                val list = memories.joinToString(". ") { "${it.title}: ${it.content}" }
+                val list = memories.joinToString(". ") { it.content }
                 localized(intent.detectedLanguage,
-                    en = "Here is what I remember locally: $list.",
-                    bn = "আমার লোকাল মেমোরিতে যা আছে: $list।",
-                    hi = "मेरी लोकल मेमोरी में यह सहेजा है: $list।"
+                    en = "For this session I noted: $list.",
+                    bn = "এই সেশনের জন্য যা মনে রেখেছি: $list।",
+                    hi = "इस सेशन के लिए मेरे पास यह जानकारी है: $list।"
                 )
             }
-            return "Offline • Local Memory" to ReasoningDecision("Recalled local memories", reply, emptyList())
+            return "Offline • Session Context" to ReasoningDecision("Recalled temporary session notes", reply, emptyList())
         }
 
         // 3. Time, Date, Battery, Storage / RAM
@@ -158,10 +196,11 @@ class OfflineAssistantEngine(
                 "হ্যালো", "হাই", "কেমন আছো", "কেমন আছেন", "नमस्ते", "हेलो", "कैसे हो"
             ) || lower.contains("who are you") || lower.contains("what can you do") || lower.contains("how are you")
         ) {
+            val nameGreeting = settingsRepository.userDisplayName().takeIf { it.isNotBlank() }?.let { " $it" } ?: ""
             val reply = localized(intent.detectedLanguage,
-                en = "Hey! I'm ULTRA AI in Offline Mode right now. Even without internet, I can open apps, control volume and flashlight, set reminders, inspect screens, read notifications, convert units, and do math. Connect to Online Mode anytime for full ChatGPT-level reasoning and autonomous multi-step control.",
-                bn = "হ্যালো! আমি ULTRA AI, এখন অফলাইন মোডে আছি। ইন্টারনেট ছাড়াই আমি অ্যাপ খোলা, ভলিউম ও ফ্ল্যাশলাইট কন্ট্রোল, রিমাইন্ডার সেট, স্ক্রিন কন্ট্রোল, নোটিফিকেশন পড়া এবং হিসাব-নিকাশ করতে পারি। সম্পূর্ণ ChatGPT ও অটোনোমাস ব্রেইন ব্যবহার করতে Online Mode চালু করুন।",
-                hi = "नमस्ते! मैं ULTRA AI हूँ और अभी ऑफलाइन मोड में हूँ। बिना इंटरनेट के भी मैं ऐप्स खोल सकता हूँ, वॉल्यूम और फ्लैशलाइट कंट्रोल कर सकता हूँ, रिमाइंडर सेट कर सकता हूँ और गणित हल कर सकता हूँ। पूर्ण ChatGPT बुद्धि के लिए ऑनलाइन मोड चालू करें।"
+                en = "Hey$nameGreeting! I'm ULTRA AI in Offline Mode right now. Even without internet, I can open apps, control volume and flashlight, set reminders, inspect or scroll screens, read notifications, convert units, and do math. When internet returns in Auto Mode, I'll switch back to Online AI automatically.",
+                bn = "হ্যালো$nameGreeting! আমি ULTRA AI, এখন অফলাইন মোডে আছি। ইন্টারনেট ছাড়াই আমি অ্যাপ খোলা, ভলিউম ও ফ্ল্যাশলাইট কন্ট্রোল, রিমাইন্ডার সেট, স্ক্রিন স্ক্রল ও কন্ট্রোল, নোটিফিকেশন পড়া এবং হিসাব-নিকাশ করতে পারি। ইন্টারনেট ফিরে এলে Auto Mode-এ স্বয়ংক্রিয়ভাবে Online AI চালু হয়ে যাবে।",
+                hi = "नमस्ते$nameGreeting! मैं ULTRA AI हूँ और अभी ऑफलाइन मोड में हूँ। बिना इंटरनेट के भी मैं ऐप्स खोल सकता हूँ, वॉल्यूम और फ्लैशलाइट कंट्रोल कर सकता हूँ, रिमाइंडर सेट कर सकता हूँ और गणित हल कर सकता हूँ। इंटरनेट आते ही Auto Mode में ऑनलाइन AI अपने-आप शुरू हो जाएगा।"
             )
             return "Offline • Local Assistant" to ReasoningDecision("Offline greeting & capability summary", reply, emptyList())
         }

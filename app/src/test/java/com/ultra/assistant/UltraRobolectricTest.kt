@@ -185,4 +185,72 @@ class UltraRobolectricTest {
         assertNotNull(msg)
         assertTrue(msg!!.thoughtSummary.contains("Step 1"))
     }
+
+    @Test
+    fun `privacy enforces userDisplayName only while chat memory stays RAM-only and clears on close`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val settingsRepo = UltraRuntime.settingsRepository(context)
+        val db = com.ultra.assistant.memory.UltraDatabase.getInstance(context)
+        val memoryMgr = UltraRuntime.memoryManager(context)
+        memoryMgr.clearTemporaryContext()
+
+        // Cloud sync must remain disabled even if requested
+        settingsRepo.updateSettings {
+            it.copy(cloudSyncEnabled = true, encryptCloudMemory = true, userDisplayName = "Nadia")
+        }
+        val persisted = settingsRepo.settingsFlow.firstOrNullCompat()
+        assertEquals("Nadia", persisted?.userDisplayName)
+        assertEquals(false, persisted?.cloudSyncEnabled)
+        assertEquals(false, persisted?.encryptCloudMemory)
+
+        // Chats & session notes live in RAM only, never in Room disk tables
+        memoryMgr.recordConversationTurn("user", "Hello ULTRA", "en")
+        memoryMgr.saveMemory("SESSION_NOTE", "Note", "Likes black coffee", source = "user")
+        memoryMgr.recordAuditLog("open_app", "LOW", "OK", "Opened YouTube", true)
+
+        assertTrue(memoryMgr.getRecentConversation(5).isNotEmpty())
+        assertTrue(memoryMgr.getPromptContextMemories(5).isNotEmpty())
+        assertTrue(db.conversationDao().getLatest(10).isEmpty())
+        assertTrue(db.memoryDao().getActiveMemories(0L, 10).isEmpty())
+
+        // Closing session wipes RAM conversation & notes while keeping userDisplayName
+        UltraRuntime.clearEphemeralSession(context)
+        assertTrue(memoryMgr.getRecentConversation(5).isEmpty())
+        assertTrue(memoryMgr.getPromptContextMemories(5).isEmpty())
+        assertEquals("Nadia", settingsRepo.userDisplayName())
+    }
+
+    @Test
+    fun `agent manager handles stop command and keeps session context across mode switches`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val settingsRepo = LocalSettingsRepository(context)
+        settingsRepo.updateSettings { it.copy(operatingMode = com.ultra.assistant.data.AiOperatingMode.OFFLINE) }
+        val agent = UltraRuntime.agentManager(context)
+        agent.clearTemporaryContext()
+
+        val nameReport = agent.handleUserCommand("আমার নাম সাকিব")
+        assertEquals("সাকিব", settingsRepo.userDisplayName())
+        assertTrue(nameReport.finalReply.contains("সাকিব"))
+
+        val stopReport = agent.handleUserCommand("থামো")
+        assertTrue(stopReport.providerUsed.contains("Stop"))
+        assertTrue(stopReport.finalReply.contains("থেমে"))
+
+        // Context remains intact in RAM across AUTO/OFFLINE mode switch
+        agent.memoryManager.recordConversationTurn("user", "Remember topic alpha", "en")
+        settingsRepo.updateSettings { it.copy(operatingMode = com.ultra.assistant.data.AiOperatingMode.AUTO) }
+        assertTrue(agent.contextManager.getRecentHistoryPairs(5).any { it.second.contains("alpha") })
+    }
+}
+
+private suspend fun <T> kotlinx.coroutines.flow.Flow<T>.firstOrNullCompat(): T? {
+    var value: T? = null
+    try {
+        collect {
+            value = it
+            throw kotlinx.coroutines.CancellationException("done")
+        }
+    } catch (_: kotlinx.coroutines.CancellationException) {
+    }
+    return value
 }

@@ -58,7 +58,7 @@ object NotificationRepository {
             sensitiveRedacted = hasSensitive,
             postedAtMillis = sbn.postTime
         )
-        _notifications.value = (listOf(item) + _notifications.value.filterNot { it.key == item.key }).take(40)
+        _notifications.value = (listOf(item) + _notifications.value.filterNot { it.key == item.key }).take(20)
     }
 
     fun removeNotification(key: String) {

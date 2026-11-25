@@ -118,4 +118,19 @@ class UltraCoreUnitTest {
         assertFalse(IntentEngine.isCompoundAction("Open YouTube"))
         assertEquals("bn", IntentEngine.detectLanguage("kemon acho tui?"))
     }
+
+    @Test
+    fun `intent engine detects multilingual stop commands and extracts user name only`() {
+        assertTrue(IntentEngine.isStopCommand("stop"))
+        assertTrue(IntentEngine.isStopCommand("Stop speaking"))
+        assertTrue(IntentEngine.isStopCommand("থামো"))
+        assertTrue(IntentEngine.isStopCommand("চুপ করো"))
+        assertTrue(IntentEngine.isStopCommand("रुको"))
+        assertFalse(IntentEngine.isStopCommand("open youtube"))
+
+        assertEquals("Rafi", IntentEngine.extractUserNameDeclaration("My name is Rafi"))
+        assertEquals("তানভীর", IntentEngine.extractUserNameDeclaration("আমার নাম তানভীর"))
+        assertEquals("अमन", IntentEngine.extractUserNameDeclaration("मेरा नाम अमन है"))
+        assertEquals(null, IntentEngine.extractUserNameDeclaration("My name is something very long that is definitely a sentence"))
+    }
 }

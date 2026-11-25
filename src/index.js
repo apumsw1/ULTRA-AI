@@ -527,7 +527,13 @@ export default {
       } catch {
         return reply({ ok: false, error: "Invalid JSON body" }, 400);
       }
-      await recordAuditSafe(env, body);
+      await recordAuditSafe(env, {
+        userId: "anonymous",
+        toolId: String(body.toolId || "tool").slice(0, 64),
+        riskLevel: String(body.riskLevel || "LOW").slice(0, 16),
+        status: String(body.status || "OK").slice(0, 24),
+        summary: "metadata_only"
+      });
       return reply({ ok: true }, 201);
     }
 
@@ -598,13 +604,6 @@ export default {
             ? await callOpenAI(env, message, history, language, toolsJson, screenContext)
             : await callWorkersAI(env, message, history, language, toolsJson, screenContext);
         const decision = parseModelOutput(result.rawText);
-        await recordAuditSafe(env, {
-          userId: data.userId || "device",
-          toolId: decision.toolCalls.map((t) => t.toolId).join(",") || "voice_reply",
-          riskLevel: "LOW",
-          status: "OK",
-          summary: `${result.provider}: ${decision.reply.slice(0, 120)}`
-        });
         return reply({
           ok: true,
           provider: result.provider,

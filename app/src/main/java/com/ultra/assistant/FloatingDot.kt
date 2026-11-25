@@ -20,7 +20,7 @@ import kotlin.math.abs
 
 class FloatingDot(private val context: Context) {
     private val wm = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
-    private val settingsRepo = LocalSettingsRepository(context)
+    private val settingsRepo = UltraRuntime.settingsRepository(context.applicationContext)
     private var rootView: LinearLayout? = null
     private var params: WindowManager.LayoutParams? = null
 
@@ -173,10 +173,14 @@ class FloatingDot(private val context: Context) {
         micButton = micBtn
 
         val stopBtn = createActionChip("Stop", 0xFF3D1E2E.toInt(), 0xFFFF8AA0.toInt()) {
+            val stopAction = if (currentState == "PROCESSING") {
+                VoiceAssistantService.ACTION_CANCEL_AGENT
+            } else {
+                VoiceAssistantService.ACTION_STOP_SPEAKING
+            }
             runCatching {
                 context.startService(
-                    Intent(context, VoiceAssistantService::class.java)
-                        .setAction(VoiceAssistantService.ACTION_STOP_SPEAKING)
+                    Intent(context, VoiceAssistantService::class.java).setAction(stopAction)
                 )
             }
         }
@@ -311,7 +315,7 @@ class FloatingDot(private val context: Context) {
         }
         snippetView?.text = currentSnippet
         micButton?.text = if (currentState == "SPEAKING") "Interrupt" else "Listen"
-        stopButton?.visibility = if (currentState == "SPEAKING" || currentState == "LISTENING") View.VISIBLE else View.GONE
+        stopButton?.visibility = if (currentState in setOf("SPEAKING", "LISTENING", "PROCESSING")) View.VISIBLE else View.GONE
     }
 
     private fun createActionChip(

@@ -56,7 +56,6 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
-import androidx.credentials.CredentialManager
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.Companion.APPLICATION_KEY
@@ -69,20 +68,14 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
-import com.google.firebase.Firebase
-import com.google.firebase.auth.auth
 import com.ultra.assistant.data.AiOperatingMode
 import com.ultra.assistant.data.AiSpeedProfile
 import com.ultra.assistant.data.UltraSettings
-import com.ultra.assistant.firebase.authStateFlow
 import com.ultra.assistant.firebase.configureAppCheck
-import com.ultra.assistant.firebase.isFirebaseInitialized
-import com.ultra.assistant.firebase.signOut
 import com.ultra.assistant.permissions.PermissionManager
 import com.ultra.assistant.tools.PermissionRequirement
 import com.ultra.assistant.ui.UltraViewModel
 import com.ultra.assistant.ui.apps.AppManagerScreen
-import com.ultra.assistant.ui.auth.AuthScreen
 import com.ultra.assistant.ui.automation.AutomationScreen
 import com.ultra.assistant.ui.components.AmbientEdgeGlow
 import com.ultra.assistant.ui.components.ChatBackgroundLayer
@@ -152,6 +145,13 @@ class MainActivity : ComponentActivity() {
             pendingRoute.value = it
         }
     }
+
+    override fun onDestroy() {
+        if (isFinishing && !VoiceAssistantService.isRunning) {
+            UltraRuntime.clearEphemeralSession(applicationContext)
+        }
+        super.onDestroy()
+    }
 }
 
 @Composable
@@ -159,69 +159,21 @@ fun UltraAppRoot(
     requestedRoute: String? = null,
     onRouteConsumed: () -> Unit = {}
 ) {
-    val context = LocalContext.current
-    val firebaseReady = remember(context) { isFirebaseInitialized(context) }
-    var offlineModeActive by remember { mutableStateOf(false) }
-
-    if (!firebaseReady) {
-        if (offlineModeActive) {
-            UltraAuthenticatedShell(
-                currentUserId = "local_offline_user",
-                userEmail = "Offline Local Mode",
-                requestedRoute = requestedRoute,
-                onRouteConsumed = onRouteConsumed,
-                onOfflineExit = { offlineModeActive = false }
-            )
-        } else {
-            AuthScreen(
-                firebaseAvailable = false,
-                onAuthSuccess = {},
-                onContinueOffline = { offlineModeActive = true }
-            )
-        }
-        return
-    }
-
-    val auth = remember { runCatching { Firebase.auth }.getOrNull() }
-    if (auth == null) {
-        AuthScreen(
-            firebaseAvailable = false,
-            onAuthSuccess = {},
-            onContinueOffline = { offlineModeActive = true }
-        )
-        return
-    }
-
-    val currentUser by auth.authStateFlow().collectAsStateWithLifecycle(initialValue = auth.currentUser)
-    val user = currentUser
-    if (user == null) {
-        AuthScreen(
-            firebaseAvailable = true,
-            onAuthSuccess = {}
-        )
-    } else {
-        key(user.uid) {
-            UltraAuthenticatedShell(
-                currentUserId = user.uid,
-                userEmail = user.email,
-                requestedRoute = requestedRoute,
-                onRouteConsumed = onRouteConsumed
-            )
-        }
-    }
+    // Direct startup into ULTRA AI — no unnecessary Local Mode / Auth launch screen.
+    UltraAuthenticatedShell(
+        currentUserId = "local_session",
+        requestedRoute = requestedRoute,
+        onRouteConsumed = onRouteConsumed
+    )
 }
 
 @Composable
 fun UltraAuthenticatedShell(
     currentUserId: String,
-    userEmail: String?,
     requestedRoute: String? = null,
-    onRouteConsumed: () -> Unit = {},
-    onOfflineExit: (() -> Unit)? = null
+    onRouteConsumed: () -> Unit = {}
 ) {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    val credentialManager = remember(context) { CredentialManager.create(context) }
 
     val viewModel: UltraViewModel = viewModel(
         key = currentUserId,
@@ -248,6 +200,7 @@ fun UltraAuthenticatedShell(
 
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val isOnline by viewModel.isOnline.collectAsStateWithLifecycle()
+    val isReconnecting by viewModel.isReconnecting.collectAsStateWithLifecycle()
     val memories by viewModel.memories.collectAsStateWithLifecycle()
     val sessions by viewModel.sessions.collectAsStateWithLifecycle()
     val activeSessionId by viewModel.activeSessionId.collectAsStateWithLifecycle()
@@ -612,6 +565,7 @@ fun UltraAuthenticatedShell(
                                     voiceState = voiceState,
                                     partialTranscript = partialTranscript,
                                     isOnline = isOnline,
+                                    isReconnecting = isReconnecting,
                                     settings = settings,
                                     permissions = permissions,
                                     isBusy = isBusy,
@@ -680,6 +634,7 @@ fun UltraAuthenticatedShell(
                                     lastAgentReply = lastAgentReply,
                                     streamingReply = streamingReply,
                                     isOnline = isOnline,
+                                    isReconnecting = isReconnecting,
                                     settings = settings,
                                     onStartVoice = startVoiceAssistant,
                                     onStopVoice = stopVoiceAssistant,
@@ -748,8 +703,8 @@ fun UltraAuthenticatedShell(
                             }
                             composable(UltraRoutes.SETTINGS) {
                                 SettingsScreen(
-                                    userEmail = userEmail,
                                     isOnline = isOnline,
+                                    isReconnecting = isReconnecting,
                                     settings = settings,
                                     permissions = permissions,
                                     deviceInfo = viewModel.deviceInfo(),
@@ -758,6 +713,7 @@ fun UltraAuthenticatedShell(
                                     sessions = sessions,
                                     onlineDiagnostic = onlineDiagnostic,
                                     workerHealthStatus = workerHealthStatus,
+                                    onUpdateUserDisplayName = viewModel::updateUserDisplayName,
                                     onUpdateOperatingMode = viewModel::updateOperatingMode,
                                     onUpdateSpeedProfile = viewModel::updateSpeedProfile,
                                     onUpdateAiConfig = viewModel::updateAiConfig,
@@ -786,7 +742,6 @@ fun UltraAuthenticatedShell(
                                     },
                                     onLaunchFloatingDot = enableFloatingDot,
                                     onUpdatePrivacyConfig = viewModel::updatePrivacyConfig,
-                                    onSaveMemory = viewModel::saveMemoryManual,
                                     onDeleteMemory = viewModel::deleteMemory,
                                     onClearAllMemories = viewModel::clearAllMemories,
                                     onStartNewChat = viewModel::startNewConversation,
@@ -806,15 +761,7 @@ fun UltraAuthenticatedShell(
                                     onOpenNotificationSettings = { safeStartActivity(PermissionManager.notificationListenerSettingsIntent()) },
                                     onOpenBatterySettings = { safeStartActivity(PermissionManager.batteryOptimizationSettingsIntent()) },
                                     onActivateDeviceAdmin = { safeStartActivity(PermissionManager.deviceAdminActivateIntent(context)) },
-                                    onOpenSecuritySettings = { safeStartActivity(PermissionManager.securitySettingsIntent()) },
-                                    onSignOut = {
-                                        if (VoiceAssistantService.isRunning) stopVoiceAssistant()
-                                        if (onOfflineExit != null) {
-                                            onOfflineExit()
-                                        } else {
-                                            signOut(credentialManager, scope)
-                                        }
-                                    }
+                                    onOpenSecuritySettings = { safeStartActivity(PermissionManager.securitySettingsIntent()) }
                                 )
                             }
                         }

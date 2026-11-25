@@ -14,40 +14,79 @@ class NetworkMonitor(context: Context) {
     private val connectivityManager =
         appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
 
-    private val _isOnline = MutableStateFlow(checkCurrentConnectivity())
+    private val _isOnline = MutableStateFlow(computeConnectivity())
     val isOnline: StateFlow<Boolean> = _isOnline.asStateFlow()
+
+    private val _isReconnecting = MutableStateFlow(false)
+    val isReconnecting: StateFlow<Boolean> = _isReconnecting.asStateFlow()
+
+    private var callback: ConnectivityManager.NetworkCallback? = null
 
     init {
         runCatching {
             val request = NetworkRequest.Builder()
                 .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
                 .build()
-            connectivityManager?.registerNetworkCallback(request, object : ConnectivityManager.NetworkCallback() {
+            val cb = object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) {
-                    _isOnline.value = checkCurrentConnectivity()
+                    val nowOnline = computeConnectivity()
+                    _isReconnecting.value = !nowOnline
+                    _isOnline.value = nowOnline
                 }
 
                 override fun onLost(network: Network) {
-                    _isOnline.value = checkCurrentConnectivity()
+                    val nowOnline = computeConnectivity(lostNetwork = network)
+                    _isReconnecting.value = false
+                    _isOnline.value = nowOnline
+                }
+
+                override fun onUnavailable() {
+                    _isReconnecting.value = false
+                    _isOnline.value = false
                 }
 
                 override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
-                    _isOnline.value = checkCurrentConnectivity()
+                    val hasInternet = hasInternetCaps(networkCapabilities)
+                    val nowOnline = hasInternet || computeConnectivity()
+                    _isReconnecting.value = false
+                    _isOnline.value = nowOnline
                 }
-            })
+            }
+            callback = cb
+            connectivityManager?.registerNetworkCallback(request, cb)
         }
     }
 
     fun checkCurrentConnectivity(): Boolean {
+        val online = computeConnectivity()
+        if (_isOnline.value != online) {
+            _isOnline.value = online
+        }
+        return online
+    }
+
+    fun unregister() {
+        callback?.let { cb ->
+            runCatching { connectivityManager?.unregisterNetworkCallback(cb) }
+        }
+        callback = null
+    }
+
+    private fun computeConnectivity(lostNetwork: Network? = null): Boolean {
         val cm = connectivityManager ?: return false
         return runCatching {
             val active = cm.activeNetwork ?: return false
+            if (lostNetwork != null && active == lostNetwork) return false
             val caps = cm.getNetworkCapabilities(active) ?: return false
-            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
-                (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) ||
-                    caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
-                    caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) ||
-                    caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET))
+            hasInternetCaps(caps)
         }.getOrDefault(false)
+    }
+
+    private fun hasInternetCaps(caps: NetworkCapabilities): Boolean {
+        return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+            (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) ||
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) ||
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET))
     }
 }

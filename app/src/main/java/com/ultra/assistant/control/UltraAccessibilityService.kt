@@ -162,7 +162,7 @@ class UltraAccessibilityService : AccessibilityService() {
             if (imeSubmitted) {
                 submittedNote = " and submitted"
             } else {
-                val submitNode = listOf("Search", "Send", "Go", "Submit", "Done", "খুঁজুন")
+                val submitNode = listOf("Search", "Send", "Go", "Submit", "Done", "খুঁজুন", "সার্চ", "खोजें")
                     .firstNotNullOfOrNull { btnLabel -> findMatchingNode(root, btnLabel, "") }
                 if (submitNode != null) {
                     var clickTarget: AccessibilityNodeInfo? = submitNode
@@ -184,18 +184,21 @@ class UltraAccessibilityService : AccessibilityService() {
         if (isProtectedPackage(pkg)) {
             return AccessibilityActionResult(false, "Scrolling blocked on protected screen ($pkg).")
         }
-        val scrollable = findFirstScrollableNode(root)
-            ?: return AccessibilityActionResult(false, "No scrollable container found on current screen.")
-        val action = when (direction.lowercase()) {
-            "up", "backward", "prev" -> AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
-            else -> AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
-        }
-        val ok = scrollable.performAction(action)
-        return if (ok) {
-            AccessibilityActionResult(true, "Scrolled $direction.")
+        val dirLower = direction.lowercase()
+        val isUp = dirLower in setOf("up", "backward", "prev")
+        val action = if (isUp) {
+            AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
         } else {
-            AccessibilityActionResult(false, "Could not scroll $direction.")
+            AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
         }
+        val scrollable = findBestScrollableNode(root)
+        if (scrollable != null && scrollable.performAction(action)) {
+            return AccessibilityActionResult(true, "Scrolled $direction.")
+        }
+        if (performScrollGesture(if (isUp) "up" else "down")) {
+            return AccessibilityActionResult(true, "Scrolled $direction via gesture.")
+        }
+        return AccessibilityActionResult(false, "Could not scroll $direction on current screen.")
     }
 
     fun navigateBack(): AccessibilityActionResult {
@@ -239,6 +242,24 @@ class UltraAccessibilityService : AccessibilityService() {
         return dispatchGesture(gesture, null, null)
     }
 
+    fun performScrollGesture(direction: String): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return false
+        val metrics = resources.displayMetrics
+        val w = metrics.widthPixels.toFloat().coerceAtLeast(320f)
+        val h = metrics.heightPixels.toFloat().coerceAtLeast(640f)
+        val cx = w * 0.5f
+        val isUp = direction.lowercase() in setOf("up", "backward", "prev")
+        val startY = if (isUp) h * 0.30f else h * 0.74f
+        val endY = if (isUp) h * 0.74f else h * 0.30f
+        val path = Path().apply {
+            moveTo(cx, startY)
+            lineTo(cx, endY)
+        }
+        val stroke = GestureDescription.StrokeDescription(path, 0L, 280L)
+        val gesture = GestureDescription.Builder().addStroke(stroke).build()
+        return dispatchGesture(gesture, null, null)
+    }
+
     private fun collectNodes(
         node: AccessibilityNodeInfo,
         out: MutableList<AccessibleUiElement>,
@@ -246,22 +267,24 @@ class UltraAccessibilityService : AccessibilityService() {
     ) {
         if (out.size >= maxNodes) return
         if (node.isPassword) return
-        val text = node.text?.toString()?.trim().orEmpty()
-        val desc = node.contentDescription?.toString()?.trim().orEmpty()
-        val viewId = node.viewIdResourceName.orEmpty()
-        if (text.isNotBlank() || desc.isNotBlank() || node.isClickable || node.isEditable || node.isScrollable) {
-            val rect = Rect()
-            node.getBoundsInScreen(rect)
-            out += AccessibleUiElement(
-                text = text.take(120),
-                contentDescription = desc.take(120),
-                viewId = viewId,
-                className = node.className?.toString()?.substringAfterLast('.').orEmpty(),
-                clickable = node.isClickable,
-                editable = node.isEditable,
-                scrollable = node.isScrollable,
-                bounds = rect
-            )
+        val rect = Rect()
+        node.getBoundsInScreen(rect)
+        if (node.isVisibleToUser && !rect.isEmpty) {
+            val text = node.text?.toString()?.trim().orEmpty()
+            val desc = node.contentDescription?.toString()?.trim().orEmpty()
+            val viewId = node.viewIdResourceName.orEmpty()
+            if (text.isNotBlank() || desc.isNotBlank() || node.isClickable || node.isEditable || node.isScrollable) {
+                out += AccessibleUiElement(
+                    text = text.take(120),
+                    contentDescription = desc.take(120),
+                    viewId = viewId,
+                    className = node.className?.toString()?.substringAfterLast('.').orEmpty(),
+                    clickable = node.isClickable,
+                    editable = node.isEditable,
+                    scrollable = node.isScrollable,
+                    bounds = rect
+                )
+            }
         }
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
@@ -316,6 +339,7 @@ class UltraAccessibilityService : AccessibilityService() {
                 }
             }
             if (score > 0) {
+                if (current.isVisibleToUser) score += 25
                 if (current.isClickable || current.isEditable) score += 8
                 if (score > bestScore) {
                     bestScore = score
@@ -342,14 +366,33 @@ class UltraAccessibilityService : AccessibilityService() {
         return null
     }
 
-    private fun findFirstScrollableNode(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
-        if (node.isScrollable && node.isVisibleToUser) return node
-        for (i in 0 until node.childCount) {
-            val child = node.getChild(i) ?: continue
-            val found = findFirstScrollableNode(child)
-            if (found != null) return found
+    private fun findBestScrollableNode(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        var bestNode: AccessibilityNodeInfo? = null
+        var bestScore = Long.MIN_VALUE
+
+        fun scan(current: AccessibilityNodeInfo) {
+            if (current.isScrollable && current.isVisibleToUser) {
+                val rect = Rect()
+                current.getBoundsInScreen(rect)
+                if (!rect.isEmpty) {
+                    val area = rect.width().toLong() * rect.height().toLong()
+                    // Strongly prefer tall vertical containers (like main feeds) over horizontal carousels (like Stories trays)
+                    val verticalBonus = if (rect.height() >= rect.width() * 0.85f) 1_000_000_000L else 0L
+                    val score = verticalBonus + area
+                    if (score > bestScore) {
+                        bestScore = score
+                        bestNode = current
+                    }
+                }
+            }
+            for (i in 0 until current.childCount) {
+                val child = current.getChild(i) ?: continue
+                scan(child)
+            }
         }
-        return null
+
+        scan(root)
+        return bestNode
     }
 
     private fun isProtectedPackage(pkg: String): Boolean {

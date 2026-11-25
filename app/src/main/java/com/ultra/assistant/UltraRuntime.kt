@@ -2,6 +2,7 @@ package com.ultra.assistant
 
 import android.content.Context
 import com.ultra.assistant.brain.AgentManager
+import com.ultra.assistant.control.NotificationRepository
 import com.ultra.assistant.data.LocalSettingsRepository
 import com.ultra.assistant.data.NetworkMonitor
 import com.ultra.assistant.firebase.CloudSyncRepository
@@ -47,7 +48,7 @@ object UltraRuntime {
             memoryMgr ?: MemoryManager(
                 context = context.applicationContext,
                 settingsRepository = settingsRepository(context),
-                cloudSync = cloudSyncRepository(context)
+                cloudSync = null
             ).also { memoryMgr = it }
         }
 
@@ -60,4 +61,15 @@ object UltraRuntime {
                 networkMonitor = networkMonitor(context)
             ).also { agentMgr = it }
         }
+
+    /**
+     * Clears temporary conversation turns, session notes, follow-up slots, and captured notifications
+     * when the app closes, leaving ONLY the user's given name intact.
+     */
+    fun clearEphemeralSession(context: Context) {
+        val appCtx = context.applicationContext
+        memoryManager(appCtx).clearTemporaryContext()
+        agentManager(appCtx).clearTemporaryContext()
+        NotificationRepository.clearAll()
+    }
 }

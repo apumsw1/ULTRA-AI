@@ -67,8 +67,8 @@ import com.ultra.assistant.ui.theme.ObsidianBg
 
 @Composable
 fun SettingsScreen(
-    userEmail: String?,
     isOnline: Boolean,
+    isReconnecting: Boolean,
     settings: UltraSettings,
     permissions: PermissionAuditSnapshot,
     deviceInfo: DeviceInfoReport,
@@ -77,6 +77,7 @@ fun SettingsScreen(
     sessions: List<ConversationSessionEntity>,
     onlineDiagnostic: String,
     workerHealthStatus: String?,
+    onUpdateUserDisplayName: (String) -> Unit,
     onUpdateOperatingMode: (AiOperatingMode) -> Unit,
     onUpdateSpeedProfile: (AiSpeedProfile) -> Unit,
     onUpdateAiConfig: (AiProviderMode, String, String, String) -> Unit,
@@ -93,7 +94,6 @@ fun SettingsScreen(
     onUpdateBehavior: (Boolean, Boolean, Boolean) -> Unit,
     onLaunchFloatingDot: () -> Unit,
     onUpdatePrivacyConfig: (Boolean, Boolean, Int, Boolean, Boolean, Boolean) -> Unit,
-    onSaveMemory: (String, String) -> Unit,
     onDeleteMemory: (String) -> Unit,
     onClearAllMemories: () -> Unit,
     onStartNewChat: () -> Unit,
@@ -106,17 +106,15 @@ fun SettingsScreen(
     onOpenNotificationSettings: () -> Unit,
     onOpenBatterySettings: () -> Unit,
     onActivateDeviceAdmin: () -> Unit,
-    onOpenSecuritySettings: () -> Unit,
-    onSignOut: () -> Unit
+    onOpenSecuritySettings: () -> Unit
 ) {
+    var displayNameInput by remember(settings.userDisplayName) { mutableStateOf(settings.userDisplayName) }
     var workerUrl by remember(settings.workerEndpoint) { mutableStateOf(settings.workerEndpoint) }
     var workerToken by remember(settings.workerAuthToken) { mutableStateOf(settings.workerAuthToken) }
     var wakePhrase by remember(settings.wakePhrase) { mutableStateOf(settings.wakePhrase) }
     var speed by remember(settings.voiceSpeed) { mutableFloatStateOf(settings.voiceSpeed) }
     var pitch by remember(settings.voicePitch) { mutableFloatStateOf(settings.voicePitch) }
     var volume by remember(settings.voiceVolume) { mutableFloatStateOf(settings.voiceVolume) }
-    var memTitle by remember { mutableStateOf("") }
-    var memContent by remember { mutableStateOf("") }
 
     LazyColumn(
         modifier = Modifier
@@ -135,8 +133,16 @@ fun SettingsScreen(
                 ) {
                     Text("AI Brain & Online/Offline Mode", style = MaterialTheme.typography.titleMedium)
                     StatusPill(
-                        label = if (isOnline) "NETWORK ONLINE" else "NO INTERNET",
-                        color = if (isOnline) EmeraldVerified else AmberWarning
+                        label = when {
+                            isReconnecting -> "RECONNECTING"
+                            isOnline -> "NETWORK ONLINE"
+                            else -> "OFFLINE"
+                        },
+                        color = when {
+                            isReconnecting -> ArcCyan
+                            isOnline -> EmeraldVerified
+                            else -> AmberWarning
+                        }
                     )
                 }
 
@@ -556,42 +562,58 @@ fun SettingsScreen(
             }
         }
 
-        // 16 & 17. Privacy Vault, Conversation History & Memory Controls
+        // 16 & 17. Privacy, Profile Name & Ephemeral Session Controls
         item {
             HudCard {
-                Text("Privacy, Security & Conversation History", style = MaterialTheme.typography.titleMedium)
-                SettingsSwitchRow(
-                    label = "Cloud Sync (Firestore)",
-                    checked = settings.cloudSyncEnabled,
-                    onCheckedChange = {
-                        onUpdatePrivacyConfig(it, settings.encryptCloudMemory, settings.memoryTtlDays, settings.allowNotificationContext, settings.requireSmsConfirmation, settings.requireCallConfirmation)
-                    }
+                Text("Privacy & Profile (Only Name Saved)", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "Chat history, personal memory, voice recordings, and cloud sync are disabled. Temporary session context is kept only in RAM and cleared when you close the app.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = EmeraldVerified
                 )
-                SettingsSwitchRow(
-                    label = "AES-256 Encrypt Synced Memory",
-                    checked = settings.encryptCloudMemory,
-                    onCheckedChange = {
-                        onUpdatePrivacyConfig(settings.cloudSyncEnabled, it, settings.memoryTtlDays, settings.allowNotificationContext, settings.requireSmsConfirmation, settings.requireCallConfirmation)
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedTextField(
+                        value = displayNameInput,
+                        onValueChange = { displayNameInput = it },
+                        label = { Text("Your Name (Only Permanent Data)") },
+                        singleLine = true,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("settings_name_input")
+                    )
+                    Button(
+                        onClick = { onUpdateUserDisplayName(displayNameInput) },
+                        modifier = Modifier
+                            .height(48.dp)
+                            .testTag("settings_save_name_button")
+                    ) {
+                        Text("Save")
                     }
-                )
+                }
+
                 SettingsSwitchRow(
                     label = "Confirm Sensitive SMS Actions",
                     checked = settings.requireSmsConfirmation,
                     onCheckedChange = {
-                        onUpdatePrivacyConfig(settings.cloudSyncEnabled, settings.encryptCloudMemory, settings.memoryTtlDays, settings.allowNotificationContext, it, settings.requireCallConfirmation)
+                        onUpdatePrivacyConfig(false, false, settings.memoryTtlDays, settings.allowNotificationContext, it, settings.requireCallConfirmation)
                     }
                 )
                 SettingsSwitchRow(
                     label = "Confirm Direct Phone Calls",
                     checked = settings.requireCallConfirmation,
                     onCheckedChange = {
-                        onUpdatePrivacyConfig(settings.cloudSyncEnabled, settings.encryptCloudMemory, settings.memoryTtlDays, settings.allowNotificationContext, settings.requireSmsConfirmation, it)
+                        onUpdatePrivacyConfig(false, false, settings.memoryTtlDays, settings.allowNotificationContext, settings.requireSmsConfirmation, it)
                     }
                 )
                 Text(
-                    "Saved chat sessions: ${sessions.size}. Privacy Guard blocks OTPs and passwords from AI memory.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = EmeraldVerified
+                    "Active RAM sessions: ${sessions.size} | Cloud Sync: Disabled | Voice Storage: Disabled",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = ArcCyan
                 )
 
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -601,64 +623,23 @@ fun SettingsScreen(
                             .weight(1f)
                             .height(48.dp)
                     ) {
-                        Text("New Chat")
-                    }
-                    OutlinedButton(
-                        onClick = onClearConversationHistory,
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = AmberWarning),
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(48.dp)
-                            .testTag("clear_chat_history_button")
-                    ) {
-                        Text("Clear Chats")
-                    }
-                }
-
-                OutlinedTextField(
-                    value = memTitle,
-                    onValueChange = { memTitle = it },
-                    label = { Text("Add Memory Title") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                OutlinedTextField(
-                    value = memContent,
-                    onValueChange = { memContent = it },
-                    label = { Text("Memory Content") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(
-                        onClick = {
-                            if (memTitle.isNotBlank() && memContent.isNotBlank()) {
-                                onSaveMemory(memTitle, memContent)
-                                memTitle = ""
-                                memContent = ""
-                            }
-                        },
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(48.dp)
-                            .testTag("save_memory_button")
-                    ) {
-                        Text("Save Memory")
+                        Text("New Session")
                     }
                     OutlinedButton(
                         onClick = onClearAllMemories,
                         colors = ButtonDefaults.outlinedButtonColors(contentColor = CrimsonAlert),
                         modifier = Modifier
+                            .weight(1f)
                             .height(48.dp)
                             .testTag("clear_all_memories_button")
                     ) {
-                        Text("Wipe Vault")
+                        Text("Clear Session")
                     }
                 }
             }
         }
 
-        items(memories.take(15), key = { it.id }) { mem ->
+        items(memories.take(10), key = { it.id }) { mem ->
             HudCard {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -666,32 +647,11 @@ fun SettingsScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(mem.title, style = MaterialTheme.typography.titleMedium)
-                    StatusPill(label = mem.category, color = ArcCyan)
+                    StatusPill(label = "RAM ONLY", color = ArcCyan)
                 }
                 Text(mem.content, style = MaterialTheme.typography.bodyMedium)
                 OutlinedButton(onClick = { onDeleteMemory(mem.id) }, modifier = Modifier.height(48.dp)) {
-                    Text("Delete Memory")
-                }
-            }
-        }
-
-        // 18. Account & Sign Out
-        item {
-            HudCard {
-                Text("Account", style = MaterialTheme.typography.titleMedium)
-                Text(
-                    "Signed in as: ${userEmail ?: "Google Account"}",
-                    style = MaterialTheme.typography.bodyMedium
-                )
-                OutlinedButton(
-                    onClick = onSignOut,
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = CrimsonAlert),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(48.dp)
-                        .testTag("sign_out_button")
-                ) {
-                    Text("Sign Out")
+                    Text("Remove Note")
                 }
             }
         }

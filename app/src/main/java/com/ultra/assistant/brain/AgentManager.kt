@@ -2,6 +2,7 @@ package com.ultra.assistant.brain
 
 import android.content.Context
 import com.ultra.assistant.control.ScreenController
+import com.ultra.assistant.data.AiOperatingMode
 import com.ultra.assistant.data.LocalSettingsRepository
 import com.ultra.assistant.data.NetworkMonitor
 import com.ultra.assistant.memory.MemoryManager
@@ -14,6 +15,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 
 class AgentManager(
     context: Context,
@@ -25,7 +27,7 @@ class AgentManager(
     val toolRegistry = ToolRegistry(appContext, memoryManager, settingsRepository)
     private val taskExecutor = TaskExecutor(toolRegistry, memoryManager, settingsRepository)
     private val screenController = ScreenController(appContext)
-    val modelRouter = ModelRouter(settingsRepository)
+    val modelRouter = ModelRouter(settingsRepository, networkMonitor)
     private val intentEngine = IntentEngine()
     val contextManager = ContextManager(memoryManager)
     private val reasoningEngine = ReasoningEngine(appContext, modelRouter, settingsRepository, networkMonitor, memoryManager)
@@ -52,7 +54,17 @@ class AgentManager(
 
     fun requestStop() {
         stopRequested = true
-        _liveStatus.value = "Stopping task..."
+        _isStreaming.value = false
+        _streamingReply.value = ""
+        _pendingConfirmation.value = null
+        _liveStatus.value = "Stopped"
+    }
+
+    fun clearTemporaryContext() {
+        requestStop()
+        contextManager.clearTemporaryContext()
+        _latestReport.value = null
+        modelRouter.clearTransientDiagnostic()
     }
 
     suspend fun handleUserCommand(rawInput: String): AgentExecutionReport {
@@ -63,6 +75,30 @@ class AgentManager(
         stopRequested = false
 
         try {
+            // Immediate Stop command in English / Bengali / Hindi
+            if (IntentEngine.isStopCommand(input)) {
+                requestStop()
+                val lang = IntentEngine.detectLanguage(input)
+                val stopReply = when (lang) {
+                    "bn" -> "ঠিক আছে, থেমে গেলাম।"
+                    "hi" -> "ठीक है, मैंने रोक दिया है।"
+                    else -> "Stopped as requested."
+                }
+                val report = AgentExecutionReport(
+                    userInput = input,
+                    providerUsed = "Local Stop Control",
+                    finalReply = stopReply,
+                    steps = listOf(AgentStepTrace(1, "VERIFY", "User triggered stop command")),
+                    toolResults = emptyList()
+                )
+                _latestReport.value = report
+                return report
+            }
+
+            // Persist ONLY user's given name if explicitly introduced
+            IntentEngine.extractUserNameDeclaration(input)?.let { declaredName ->
+                settingsRepository.updateUserDisplayName(declaredName)
+            }
             // Handle active music follow-up slot if waiting
             if (contextManager.followUpSlot is FollowUpSlot.MusicLanguage) {
                 contextManager.followUpSlot = FollowUpSlot.None
@@ -121,6 +157,7 @@ class AgentManager(
 
             val history = contextManager.getRecentHistoryPairs(12)
             val memories = contextManager.buildMemorySummary()
+            val settingsSnapshot = settingsRepository.settingsFlow.first()
             val effectiveOffline = reasoningEngine.isEffectiveOffline()
 
             // Stream analytical ChatGPT-style conversation directly when online and not an action command
@@ -129,7 +166,13 @@ class AgentManager(
                 !looksLikeActionRequest(input)
             ) {
                 _liveStatus.value = "✦ Thinking..."
-                val streamed = tryStreamConversation(input, history, memories, intent.detectedLanguage)
+                val streamed = tryStreamConversation(
+                    input = input,
+                    history = history,
+                    memories = memories,
+                    userDisplayName = settingsSnapshot.userDisplayName,
+                    lang = intent.detectedLanguage
+                )
                 if (streamed != null) {
                     traces += AgentStepTrace(2, "PLAN", streamed.thoughtSummary.ifBlank { "Streamed conversational reasoning" })
                     memoryManager.recordConversationTurn("user", input, intent.detectedLanguage)
@@ -140,6 +183,7 @@ class AgentManager(
                         providerLabel = streamed.provider,
                         thoughtSummary = streamed.thoughtSummary
                     )
+                    contextManager.lastTopic = input.take(80)
                     val report = AgentExecutionReport(
                         userInput = input,
                         providerUsed = streamed.provider,
@@ -153,6 +197,7 @@ class AgentManager(
                 }
             }
 
+            // Keep temporary conversation context across Online <-> Offline fallback seamlessly
             _liveStatus.value = "✦ Reasoning & Planning..."
             val toolCatalogJson = toolRegistry.schemaSummaryForPrompt()
             val (providerUsed, initialDecision) = reasoningEngine.decide(
@@ -194,6 +239,9 @@ class AgentManager(
                     )
                     awaitingConfirmation = true
                     break
+                }
+                if (res.success && call.toolId == "open_app") {
+                    contextManager.lastActiveApp = call.args["appName"]?.take(60)
                 }
                 if (!res.success && call.toolId == "open_app") {
                     nextNeeded = false
@@ -301,15 +349,9 @@ class AgentManager(
                 providerLabel = providerUsed,
                 thoughtSummary = combinedThought
             )
+            contextManager.lastTopic = input.take(80)
 
-            if (initialDecision.memoryCandidateTitle.isNotBlank() && initialDecision.memoryCandidateContent.isNotBlank()) {
-                memoryManager.saveMemory(
-                    category = "PREFERENCE",
-                    title = initialDecision.memoryCandidateTitle,
-                    content = initialDecision.memoryCandidateContent,
-                    source = "ai_reasoning"
-                )
-            }
+            // Do not store personal memories permanently; only userDisplayName is persisted via explicit introduction.
 
             val report = AgentExecutionReport(
                 userInput = input,
@@ -337,6 +379,7 @@ class AgentManager(
         input: String,
         history: List<Pair<String, String>>,
         memories: String,
+        userDisplayName: String,
         lang: String
     ): StreamResult? {
         val langLabel = when (lang) {
@@ -345,8 +388,11 @@ class AgentManager(
             else -> "English"
         }
         val contextualPrompt = buildString {
+            if (userDisplayName.isNotBlank()) {
+                append("User's given name: $userDisplayName\n")
+            }
             if (memories != "None") {
-                append("Known user preferences/memories:\n")
+                append("Temporary session context:\n")
                 append(memories)
                 append("\n\n")
             }

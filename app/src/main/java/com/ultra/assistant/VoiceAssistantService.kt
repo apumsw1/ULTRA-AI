@@ -251,17 +251,18 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
         }
     }
 
-    private fun applyVoiceSettings() {
+    private fun applyVoiceSettings(languageOverride: String? = null) {
         val engine = tts ?: return
         val effectiveOffline = isEffectiveOffline()
+        val chosenLanguage = languageOverride ?: settingsRepository.language()
         audioController.configureTts(
             tts = engine,
-            languageSetting = settingsRepository.language(),
+            languageSetting = chosenLanguage,
             gender = settingsRepository.voiceGender(),
             speed = settingsRepository.voiceSpeed(),
             userPitch = settingsRepository.voicePitch(),
             preferOffline = effectiveOffline,
-            explicitVoiceName = settingsRepository.voiceName()
+            explicitVoiceName = if (languageOverride == null) settingsRepository.voiceName() else null
         )
     }
 
@@ -365,7 +366,8 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
                     3 -> 2800L
                     else -> 4000L
                 }
-                if (consecutiveIdleErrors <= 8) {
+                val maxRetries = if (settingsRepository.batteryConsciousListening()) 4 else 8
+                if (consecutiveIdleErrors <= maxRetries) {
                     restartListening(delay)
                 }
             }
@@ -458,6 +460,16 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
             return
         }
 
+        if (IntentEngine.isStopCommand(commandText)) {
+            agentManager.requestStop()
+            activeAgentJob?.cancel()
+            activeAgentJob = null
+            aiRequestInProgress = false
+            stopSpeakingOnly()
+            sendAgentReply("Stopped.")
+            return
+        }
+
         aiRequestInProgress = true
         sendVoiceState("PROCESSING", commandText)
         activeAgentJob?.cancel()
@@ -492,7 +504,12 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
             return
         }
 
-        applyVoiceSettings()
+        val detectedSpeechLanguage = when {
+            clean.any { it in '\u0980'..'\u09FF' } -> "Bengali"
+            clean.any { it in '\u0900'..'\u097F' } -> "Hindi"
+            else -> null
+        }
+        applyVoiceSettings(detectedSpeechLanguage)
         audioController.requestSpeechFocus()
         speaking = true
         listening = false
@@ -605,7 +622,10 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
         currentState = "IDLE"
         destroyed = true
         handler.removeCallbacksAndMessages(null)
+        activeAgentJob?.cancel()
+        activeAgentJob = null
         floatingDot?.hide()
+        floatingDot = null
         audioController.abandonSpeechFocus()
         runCatching {
             recognizer?.cancel()
@@ -637,7 +657,10 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
         currentState = "IDLE"
         destroyed = true
         handler.removeCallbacksAndMessages(null)
+        activeAgentJob?.cancel()
+        activeAgentJob = null
         floatingDot?.hide()
+        floatingDot = null
         audioController.abandonSpeechFocus()
         runCatching {
             recognizer?.cancel()

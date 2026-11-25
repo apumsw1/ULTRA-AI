@@ -773,7 +773,7 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
 
     private fun shouldUseNeuralTts(): Boolean {
         if (isEffectiveOffline()) return false
-        return runCatching { FirebaseApp.getInstance() }.isSuccess
+        return agentManager.modelRouter.shouldAttemptNeuralSpeech(settingsRepository.aiProviderMode())
     }
 
     private fun ensureNeuralSpeechQueue(generationId: Long): Channel<Pair<Long, String>> {
@@ -785,6 +785,7 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
         neuralSpeechChannel = ch
         neuralSpeechJob = serviceScope.launch {
             var completedChunk = false
+            var fallbackUtteranceQueued = false
             try {
                 for ((itemGen, chunkText) in ch) {
                     if (!isRunning || destroyed || speechGenerationId.get() != generationId || itemGen != generationId) {
@@ -808,14 +809,22 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
                         )
                     } ?: false
 
-                    if (!playedNeural && isRunning && !destroyed && speechGenerationId.get() == generationId) {
-                        // Graceful local TTS fallback if Gemini neural TTS unavailable
-                        speakFallbackViaPlatformTts(chunkText, generationId, isFirst = !completedChunk)
+                    if (playedNeural) {
+                        fallbackUtteranceQueued = false
+                    } else if (isRunning && !destroyed && speechGenerationId.get() == generationId) {
+                        // Graceful local TTS fallback if neural TTS is unavailable
+                        if (speakFallbackViaPlatformTts(chunkText, generationId, isFirst = !completedChunk)) {
+                            fallbackUtteranceQueued = true
+                        }
                     }
                     completedChunk = true
                 }
             } finally {
-                if (speechGenerationId.get() == generationId && !streamingResponseInProgress && tts?.isSpeaking != true) {
+                if (speechGenerationId.get() == generationId &&
+                    !streamingResponseInProgress &&
+                    !fallbackUtteranceQueued &&
+                    tts?.isSpeaking != true
+                ) {
                     finishSpeaking()
                 }
             }
@@ -823,9 +832,9 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
         return ch
     }
 
-    private fun speakFallbackViaPlatformTts(clean: String, generationId: Long, isFirst: Boolean) {
+    private fun speakFallbackViaPlatformTts(clean: String, generationId: Long, isFirst: Boolean): Boolean {
         val engine = tts
-        if (!ttsReady || engine == null) return
+        if (!ttsReady || engine == null) return false
         applyVoiceSettings(detectReplyLanguageOverride(clean))
         val uttId = audioController.speakNaturally(
             tts = engine,
@@ -842,7 +851,9 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
         )
         if (uttId != null) {
             activeFinalUtteranceId = uttId
+            return true
         }
+        return false
     }
 
     private fun speakStreamingSentence(sentence: String, generationId: Long, isFirst: Boolean) {

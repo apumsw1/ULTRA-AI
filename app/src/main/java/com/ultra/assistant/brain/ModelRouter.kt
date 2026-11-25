@@ -18,6 +18,7 @@ import com.ultra.assistant.data.AiProviderMode
 import com.ultra.assistant.data.AiSpeedProfile
 import com.ultra.assistant.data.LocalSettingsRepository
 import com.ultra.assistant.data.NetworkMonitor
+import com.ultra.assistant.data.UltraSettings
 import com.ultra.assistant.data.VoiceGender
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -56,8 +57,35 @@ class ModelRouter(
     private val _onlineDiagnostic = MutableStateFlow("")
     val onlineDiagnosticFlow: StateFlow<String> = _onlineDiagnostic.asStateFlow()
 
+    @Volatile
+    private var firebaseAiRejectedForSession: Boolean = false
+
+    @Volatile
+    private var firebaseNeuralTtsRejectedForSession: Boolean = false
+
+    @Volatile
+    private var workerTtsUnavailableForSession: Boolean = false
+
     fun clearTransientDiagnostic() {
         _onlineDiagnostic.value = ""
+        workerTtsUnavailableForSession = false
+    }
+
+    fun resetSessionRoutingCaches() {
+        _onlineDiagnostic.value = ""
+        firebaseAiRejectedForSession = false
+        firebaseNeuralTtsRejectedForSession = false
+        workerTtsUnavailableForSession = false
+    }
+
+    fun shouldAttemptNeuralSpeech(mode: AiProviderMode): Boolean {
+        val workerEligible = mode != AiProviderMode.FIREBASE_AI && !workerTtsUnavailableForSession
+        val firebaseReady = runCatching { FirebaseApp.getInstance() }.isSuccess
+        val firebaseEligible = mode != AiProviderMode.CLOUDFLARE_WORKER &&
+            firebaseReady &&
+            !firebaseAiRejectedForSession &&
+            !firebaseNeuralTtsRejectedForSession
+        return workerEligible || firebaseEligible
     }
 
     private val decisionSchema = Schema.obj(
@@ -147,14 +175,34 @@ class ModelRouter(
         if (networkMonitor != null && !networkMonitor.checkCurrentConnectivity()) {
             return Result.failure(IllegalStateException("Offline"))
         }
-        val firebaseReady = runCatching { FirebaseApp.getInstance() }.isSuccess
-        if (!firebaseReady) {
-            return Result.failure(IllegalStateException("Firebase AI not initialized"))
+        val settings = settingsRepository.settingsFlow.first()
+
+        // 1. Try Cloudflare Worker /api/tts first in AUTO or CLOUDFLARE_WORKER mode
+        if (settings.aiProviderMode != AiProviderMode.FIREBASE_AI && !workerTtsUnavailableForSession) {
+            val workerTts = synthesizeViaCloudflareWorker(
+                baseUrl = settings.workerEndpoint,
+                authToken = settings.workerAuthToken,
+                text = cleanText,
+                gender = voiceGender,
+                languageHint = languageHint
+            )
+            if (workerTts.isSuccess) return workerTts
         }
+
+        // 2. Try Firebase AI neural TTS when allowed and not rejected for session
+        val firebaseReady = runCatching { FirebaseApp.getInstance() }.isSuccess
+        if (settings.aiProviderMode == AiProviderMode.CLOUDFLARE_WORKER ||
+            !firebaseReady ||
+            firebaseAiRejectedForSession ||
+            firebaseNeuralTtsRejectedForSession
+        ) {
+            return Result.failure(IllegalStateException("Neural TTS unavailable"))
+        }
+
         return try {
             val model = if (voiceGender == VoiceGender.FEMALE) femaleNeuralTtsModel else maleNeuralTtsModel
             val prompt = "Read aloud in a warm, natural, human conversational voice matching the script/language ($languageHint): $cleanText"
-            val response = withTimeout(12_000L) {
+            val response = withTimeout(10_000L) {
                 model.generateContent(prompt)
             }
             val pcmBytes = response.candidates
@@ -172,8 +220,61 @@ class ModelRouter(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            if (isAuthOrAppCheckError(e)) {
+                firebaseNeuralTtsRejectedForSession = true
+            }
             Log.w(TAG, "Gemini neural TTS unavailable, falling back cleanly", e)
             Result.failure(IllegalStateException(sanitizeOnlineError(e.localizedMessage ?: "Neural TTS failed")))
+        }
+    }
+
+    private suspend fun synthesizeViaCloudflareWorker(
+        baseUrl: String,
+        authToken: String,
+        text: String,
+        gender: VoiceGender,
+        languageHint: String
+    ): Result<ByteArray> = withContext(Dispatchers.IO) {
+        try {
+            val cleanBase = UltraSettings.normalizeWorkerEndpoint(baseUrl)
+            val bodyJson = JSONObject().apply {
+                put("text", text)
+                put("gender", gender.name)
+                put("language", languageHint)
+            }
+            val reqBuilder = Request.Builder()
+                .url("$cleanBase/api/tts")
+                .post(bodyJson.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+            if (authToken.isNotBlank()) {
+                reqBuilder.header("Authorization", "Bearer ${authToken.trim()}")
+            }
+            httpClient.newCall(reqBuilder.build()).execute().use { response ->
+                val raw = response.body?.string().orEmpty()
+                if (!response.isSuccessful) {
+                    if (response.code in setOf(404, 405, 501, 503)) {
+                        workerTtsUnavailableForSession = true
+                    }
+                    return@withContext Result.failure(IllegalStateException("Worker TTS HTTP ${response.code}"))
+                }
+                val obj = JSONObject(raw)
+                val audioB64 = obj.optString("audioBase64", "").trim()
+                if (!obj.optBoolean("ok", true) || audioB64.isBlank()) {
+                    if (obj.optBoolean("fallback", false)) {
+                        workerTtsUnavailableForSession = true
+                    }
+                    return@withContext Result.failure(IllegalStateException("Worker TTS empty"))
+                }
+                val bytes = Base64.decode(audioB64, Base64.DEFAULT)
+                if (bytes.isEmpty()) {
+                    Result.failure(IllegalStateException("Decoded TTS empty"))
+                } else {
+                    Result.success(bytes)
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Result.failure(e)
         }
     }
 
@@ -192,30 +293,28 @@ class ModelRouter(
         val settings = settingsRepository.settingsFlow.first()
         val firebaseReady = runCatching { FirebaseApp.getInstance() }.isSuccess
 
-        if (settings.aiProviderMode == AiProviderMode.CLOUDFLARE_WORKER) {
+        // In AUTO or CLOUDFLARE_WORKER, prioritize the configured Cloudflare Worker (/api/transcribe) first
+        if (settings.aiProviderMode != AiProviderMode.FIREBASE_AI) {
             val workerRes = transcribeViaCloudflareWorker(
                 baseUrl = settings.workerEndpoint,
                 authToken = settings.workerAuthToken,
                 wavBytes = wavBytes,
                 languageHint = languageHint
             )
-            if (workerRes.isSuccess || !firebaseReady) return workerRes
-        }
-
-        if (firebaseReady) {
-            val geminiRes = transcribeViaFirebaseAi(wavBytes, languageHint)
-            if (geminiRes.isSuccess || settings.aiProviderMode == AiProviderMode.FIREBASE_AI) {
-                return geminiRes
+            if (workerRes.isSuccess ||
+                settings.aiProviderMode == AiProviderMode.CLOUDFLARE_WORKER ||
+                !firebaseReady ||
+                firebaseAiRejectedForSession
+            ) {
+                return workerRes
             }
         }
 
-        // Fallback to Cloudflare Worker /api/transcribe when Firebase AI fails or isn't initialized
-        return transcribeViaCloudflareWorker(
-            baseUrl = settings.workerEndpoint,
-            authToken = settings.workerAuthToken,
-            wavBytes = wavBytes,
-            languageHint = languageHint
-        )
+        return if (firebaseReady && !firebaseAiRejectedForSession) {
+            transcribeViaFirebaseAi(wavBytes, languageHint)
+        } else {
+            Result.failure(IllegalStateException("Online speech transcription unavailable"))
+        }
     }
 
     private suspend fun transcribeViaFirebaseAi(
@@ -249,6 +348,9 @@ class ModelRouter(
             _onlineDiagnostic.value = msg
             Result.failure(IllegalStateException(msg))
         } catch (e: Exception) {
+            if (isAuthOrAppCheckError(e)) {
+                firebaseAiRejectedForSession = true
+            }
             val msg = sanitizeOnlineError(e.localizedMessage ?: "Audio transcription failed")
             _onlineDiagnostic.value = msg
             Result.failure(IllegalStateException(msg))
@@ -262,10 +364,7 @@ class ModelRouter(
         languageHint: String
     ): Result<Pair<String, String>> = withContext(Dispatchers.IO) {
         try {
-            val cleanBase = baseUrl.trim().trimEnd('/')
-            if (cleanBase.isBlank()) {
-                return@withContext Result.failure(IllegalStateException("Cloudflare Worker URL is empty"))
-            }
+            val cleanBase = UltraSettings.normalizeWorkerEndpoint(baseUrl)
             val audioB64 = Base64.encodeToString(wavBytes, Base64.NO_WRAP)
             val bodyJson = JSONObject().apply {
                 put("audioBase64", audioB64)
@@ -286,12 +385,12 @@ class ModelRouter(
                     return@withContext Result.failure(IllegalStateException(friendlyErr))
                 }
                 val obj = JSONObject(raw)
-                if (!obj.optBoolean("ok", false)) {
+                if (!obj.optBoolean("ok", true)) {
                     val err = sanitizeOnlineError(obj.optString("error", "Gateway transcribe error"))
                     _onlineDiagnostic.value = err
                     return@withContext Result.failure(IllegalStateException(err))
                 }
-                val transcript = obj.optString("transcript", "").trim()
+                val transcript = obj.optString("transcript", obj.optString("text", "")).trim()
                 val lang = obj.optString("detectedLanguage", "en").trim().ifBlank { "en" }
                 _onlineDiagnostic.value = "Connected (Worker Audio)"
                 Result.success(transcript to lang)
@@ -411,39 +510,42 @@ Instructions:
     ): Result<Pair<String, ReasoningDecision>> {
         return when (mode) {
             AiProviderMode.CLOUDFLARE_WORKER -> {
-                val workerRes = callCloudflareWorkerAgent(
+                callCloudflareWorkerAgent(
                     baseUrl = workerUrl,
                     authToken = workerToken,
+                    effectiveModel = effectiveModel,
                     userMessage = userMessage,
                     history = history,
                     toolCatalogJson = toolCatalogJson,
                     screenContext = screenContext,
                     languageLabel = languageLabel
                 )
-                if (workerRes.isSuccess) workerRes else callFirebaseAiPlanner(effectiveModel, timeoutMs, prompt)
             }
             AiProviderMode.FIREBASE_AI -> {
                 callFirebaseAiPlanner(effectiveModel, timeoutMs, prompt)
             }
             AiProviderMode.AUTO -> {
-                val aiRes = callFirebaseAiPlanner(effectiveModel, timeoutMs, prompt)
-                if (aiRes.isSuccess) {
-                    aiRes
+                val workerRes = callCloudflareWorkerAgent(
+                    baseUrl = workerUrl,
+                    authToken = workerToken,
+                    effectiveModel = effectiveModel,
+                    userMessage = userMessage,
+                    history = history,
+                    toolCatalogJson = toolCatalogJson,
+                    screenContext = screenContext,
+                    languageLabel = languageLabel
+                )
+                if (workerRes.isSuccess) {
+                    workerRes
                 } else {
-                    if (networkMonitor != null && !networkMonitor.checkCurrentConnectivity()) {
-                        return aiRes
+                    if (firebaseAiRejectedForSession ||
+                        (networkMonitor != null && !networkMonitor.checkCurrentConnectivity())
+                    ) {
+                        return workerRes
                     }
-                    callCloudflareWorkerAgent(
-                        baseUrl = workerUrl,
-                        authToken = workerToken,
-                        userMessage = userMessage,
-                        history = history,
-                        toolCatalogJson = toolCatalogJson,
-                        screenContext = screenContext,
-                        languageLabel = languageLabel
-                    ).recoverCatching { workerErr ->
-                        val aiErr = aiRes.exceptionOrNull()?.message ?: "Firebase AI unavailable"
-                        throw IllegalStateException("Online AI temporarily unavailable ($aiErr; Gateway: ${workerErr.message})")
+                    callFirebaseAiPlanner(effectiveModel, timeoutMs, prompt).recoverCatching { aiErr ->
+                        val gwErr = workerRes.exceptionOrNull()?.message ?: "Cloudflare Worker unreachable"
+                        throw IllegalStateException("Online AI temporarily unavailable ($gwErr; Fallback: ${aiErr.message})")
                     }
                 }
             }
@@ -483,6 +585,9 @@ Instructions:
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            if (isAuthOrAppCheckError(e)) {
+                firebaseAiRejectedForSession = true
+            }
             val msg = sanitizeOnlineError(e.localizedMessage ?: "Firebase AI error")
             _onlineDiagnostic.value = msg
             Log.e(TAG, "Firebase AI Logic request failed", e)
@@ -493,6 +598,7 @@ Instructions:
     private suspend fun callCloudflareWorkerAgent(
         baseUrl: String,
         authToken: String,
+        effectiveModel: String,
         userMessage: String,
         history: List<Pair<String, String>>,
         toolCatalogJson: String,
@@ -500,11 +606,7 @@ Instructions:
         languageLabel: String
     ): Result<Pair<String, ReasoningDecision>> = withContext(Dispatchers.IO) {
         try {
-            val cleanBase = baseUrl.trim().trimEnd('/')
-            if (cleanBase.isBlank()) {
-                return@withContext Result.failure(IllegalStateException("Cloudflare Worker URL is empty"))
-            }
-            val endpoint = "$cleanBase/api/voice"
+            val cleanBase = UltraSettings.normalizeWorkerEndpoint(baseUrl)
             val historyArray = JSONArray().apply {
                 history.takeLast(10).forEach { (role, content) ->
                     put(JSONObject().put("role", role).put("content", content.take(1500)))
@@ -512,6 +614,8 @@ Instructions:
             }
             val bodyJson = JSONObject().apply {
                 put("message", userMessage)
+                put("prompt", userMessage)
+                put("model", effectiveModel)
                 put("language", languageLabel)
                 put("history", historyArray)
                 put("tools", toolCatalogJson)
@@ -519,51 +623,38 @@ Instructions:
                     put("screenContext", screenContext)
                 }
             }
-            val reqBuilder = Request.Builder()
-                .url(endpoint)
-                .post(bodyJson.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
-            if (authToken.isNotBlank()) {
-                reqBuilder.header("Authorization", "Bearer ${authToken.trim()}")
-            }
+            val bodyStr = bodyJson.toString()
+            val endpoints = listOf("$cleanBase/api/voice", "$cleanBase/")
+            var lastFailure: Result<Pair<String, ReasoningDecision>>? = null
 
-            httpClient.newCall(reqBuilder.build()).execute().use { response ->
-                val raw = response.body?.string().orEmpty()
-                if (!response.isSuccessful) {
-                    val friendlyErr = parseWorkerError(response.code, raw)
-                    _onlineDiagnostic.value = friendlyErr
-                    return@withContext Result.failure(IllegalStateException(friendlyErr))
+            for ((idx, endpoint) in endpoints.withIndex()) {
+                val reqBuilder = Request.Builder()
+                    .url(endpoint)
+                    .post(bodyStr.toRequestBody("application/json; charset=utf-8".toMediaType()))
+                if (authToken.isNotBlank()) {
+                    reqBuilder.header("Authorization", "Bearer ${authToken.trim()}")
                 }
-                val json = JSONObject(raw)
-                if (!json.optBoolean("ok", false)) {
-                    val err = sanitizeOnlineError(json.optString("error", "Gateway error"))
-                    _onlineDiagnostic.value = err
-                    return@withContext Result.failure(IllegalStateException(err))
-                }
-                val reply = json.optString("reply", "").trim()
-                val toolCalls = mutableListOf<PlannedToolCall>()
-                val toolArray = json.optJSONArray("toolCalls")
-                if (toolArray != null) {
-                    for (i in 0 until toolArray.length()) {
-                        val obj = toolArray.optJSONObject(i) ?: continue
-                        val argsMap = parseArgsJson(obj.optString("argsJson", "{}"))
-                        toolCalls += PlannedToolCall(
-                            toolId = obj.optString("toolId"),
-                            args = argsMap,
-                            rationale = obj.optString("rationale", "Worker planned tool")
-                        )
+                httpClient.newCall(reqBuilder.build()).execute().use { response ->
+                    val raw = response.body?.string().orEmpty()
+                    if (!response.isSuccessful) {
+                        val friendlyErr = parseWorkerError(response.code, raw)
+                        if (idx == 0 && (response.code == 404 || response.code == 405)) {
+                            lastFailure = Result.failure(IllegalStateException(friendlyErr))
+                            return@use
+                        }
+                        _onlineDiagnostic.value = friendlyErr
+                        return@withContext Result.failure(IllegalStateException(friendlyErr))
                     }
+                    val parsed = parseWorkerAgentResponse(raw)
+                    parsed.onSuccess { (label, _) ->
+                        _onlineDiagnostic.value = "Connected ($label)"
+                    }.onFailure { err ->
+                        _onlineDiagnostic.value = sanitizeOnlineError(err.message ?: "Gateway error")
+                    }
+                    return@withContext parsed
                 }
-                val providerName = json.optString("provider", "Cloudflare Worker")
-                val decision = ReasoningDecision(
-                    thoughtSummary = json.optString("thoughtSummary", "Analyzed via $providerName"),
-                    directReply = reply.ifBlank { "Done." },
-                    plannedTools = toolCalls,
-                    nextActionNeeded = json.optBoolean("nextActionNeeded", false)
-                )
-                val label = "Online • Cloudflare ($providerName)"
-                _onlineDiagnostic.value = "Connected ($label)"
-                Result.success(label to decision)
             }
+            lastFailure ?: Result.failure(IllegalStateException("Cloudflare Worker unreachable"))
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -576,29 +667,40 @@ Instructions:
 
     suspend fun testWorkerHealth(baseUrl: String, authToken: String): Result<String> = withContext(Dispatchers.IO) {
         runCatching {
-            val cleanBase = baseUrl.trim().trimEnd('/')
-            require(cleanBase.startsWith("http://") || cleanBase.startsWith("https://")) {
-                "Worker URL must start with https://"
-            }
-            val reqBuilder = Request.Builder().url("$cleanBase/health").get()
-            if (authToken.isNotBlank()) {
-                reqBuilder.header("Authorization", "Bearer ${authToken.trim()}")
-            }
-            httpClient.newCall(reqBuilder.build()).execute().use { response ->
-                val raw = response.body?.string().orEmpty()
-                if (!response.isSuccessful) {
-                    throw IllegalStateException(parseWorkerError(response.code, raw))
+            val cleanBase = UltraSettings.normalizeWorkerEndpoint(baseUrl)
+            val targets = listOf("$cleanBase/health", "$cleanBase/")
+            var lastErrorMsg = "Health check failed"
+
+            for ((idx, targetUrl) in targets.withIndex()) {
+                val reqBuilder = Request.Builder().url(targetUrl).get()
+                if (authToken.isNotBlank()) {
+                    reqBuilder.header("Authorization", "Bearer ${authToken.trim()}")
                 }
-                val json = JSONObject(raw)
-                val providers = json.optJSONObject("providers")
-                val summary = if (providers != null) {
-                    "Workers AI=${providers.optBoolean("workersAi")}, Gemini=${providers.optBoolean("gemini")}, OpenAI=${providers.optBoolean("openai")}"
-                } else {
-                    json.optString("service", "Healthy")
+                httpClient.newCall(reqBuilder.build()).execute().use { response ->
+                    val raw = response.body?.string().orEmpty()
+                    if (!response.isSuccessful) {
+                        lastErrorMsg = parseWorkerError(response.code, raw)
+                        if (idx == 0 && (response.code == 404 || response.code == 405)) {
+                            return@use
+                        }
+                        throw IllegalStateException(lastErrorMsg)
+                    }
+                    val summary = runCatching {
+                        val json = JSONObject(raw)
+                        val providers = json.optJSONObject("providers")
+                        if (providers != null) {
+                            "Workers AI=${providers.optBoolean("workersAi")}, Gemini=${providers.optBoolean("gemini")}, OpenAI=${providers.optBoolean("openai")}"
+                        } else {
+                            json.optString("service", json.optString("status", "Healthy")).ifBlank { "Healthy" }
+                        }
+                    }.getOrElse {
+                        raw.trim().take(60).ifBlank { "Healthy" }
+                    }
+                    _onlineDiagnostic.value = "Health OK ($summary)"
+                    return@runCatching "Cloudflare Gateway Ready • $summary"
                 }
-                _onlineDiagnostic.value = "Health OK ($summary)"
-                "Cloudflare Gateway Ready • $summary"
             }
+            throw IllegalStateException(lastErrorMsg)
         }.onFailure { err ->
             _onlineDiagnostic.value = sanitizeOnlineError(err.message ?: "Health check failed")
         }
@@ -618,10 +720,13 @@ Instructions:
         val effectiveModel = resolveEffectiveModel(settings.aiSpeedProfile, settings.geminiModel)
         val timeoutMs = resolveTimeoutMs(settings.aiSpeedProfile)
         val firebaseReady = runCatching { FirebaseApp.getInstance() }.isSuccess
-        if (!firebaseReady || settings.aiProviderMode == AiProviderMode.CLOUDFLARE_WORKER) {
+
+        // Prioritize Cloudflare Worker in AUTO and CLOUDFLARE_WORKER modes; fall back to Firebase AI in AUTO
+        if (settings.aiProviderMode != AiProviderMode.FIREBASE_AI) {
             val workerRes = callCloudflareWorkerAgent(
                 baseUrl = settings.workerEndpoint,
                 authToken = settings.workerAuthToken,
+                effectiveModel = effectiveModel,
                 userMessage = prompt,
                 history = history,
                 toolCatalogJson = "[]",
@@ -634,7 +739,10 @@ Instructions:
                     emit(prefix + decision.directReply)
                 },
                 onFailure = { err ->
-                    if (firebaseReady && settings.aiProviderMode == AiProviderMode.AUTO) {
+                    if (settings.aiProviderMode == AiProviderMode.AUTO &&
+                        firebaseReady &&
+                        !firebaseAiRejectedForSession
+                    ) {
                         streamFromGemini(effectiveModel, timeoutMs, prompt, history, languageLabel).collect { emit(it) }
                     } else {
                         throw err
@@ -644,35 +752,10 @@ Instructions:
             return@flow
         }
 
-        try {
-            streamFromGemini(effectiveModel, timeoutMs, prompt, history, languageLabel).collect { emit(it) }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            Log.w(TAG, "Streaming via Firebase AI failed, checking fallback", e)
-            if (settings.aiProviderMode == AiProviderMode.AUTO &&
-                (networkMonitor == null || networkMonitor.checkCurrentConnectivity())
-            ) {
-                val workerRes = callCloudflareWorkerAgent(
-                    baseUrl = settings.workerEndpoint,
-                    authToken = settings.workerAuthToken,
-                    userMessage = prompt,
-                    history = history,
-                    toolCatalogJson = "[]",
-                    screenContext = "",
-                    languageLabel = languageLabel
-                )
-                workerRes.fold(
-                    onSuccess = { (_, decision) ->
-                        val prefix = if (decision.thoughtSummary.isNotBlank()) "<thought>${decision.thoughtSummary}</thought>" else ""
-                        emit(prefix + decision.directReply)
-                    },
-                    onFailure = { throw e }
-                )
-            } else {
-                throw e
-            }
+        if (!firebaseReady) {
+            throw IllegalStateException("Firebase AI not initialized")
         }
+        streamFromGemini(effectiveModel, timeoutMs, prompt, history, languageLabel).collect { emit(it) }
     }
 
     private fun streamFromGemini(
@@ -693,16 +776,24 @@ Instructions:
         val chat = model.startChat(chatHistory)
         val fullPrompt = "Language preference: $languageLabel (reply in the exact language or mixed style the user uses).\n$prompt"
         val buffer = StringBuilder()
-        withTimeout(timeoutMs) {
-            chat.sendMessageStream(fullPrompt).collect { chunk ->
-                val delta = chunk.text.orEmpty()
-                if (delta.isNotEmpty()) {
-                    buffer.append(delta)
-                    emit(buffer.toString())
+        try {
+            withTimeout(timeoutMs) {
+                chat.sendMessageStream(fullPrompt).collect { chunk ->
+                    val delta = chunk.text.orEmpty()
+                    if (delta.isNotEmpty()) {
+                        buffer.append(delta)
+                        emit(buffer.toString())
+                    }
                 }
             }
+            _onlineDiagnostic.value = "Connected ($configuredModel)"
+        } catch (e: Exception) {
+            if (e is CancellationException && e !is TimeoutCancellationException) throw e
+            if (isAuthOrAppCheckError(e)) {
+                firebaseAiRejectedForSession = true
+            }
+            throw e
         }
-        _onlineDiagnostic.value = "Connected ($configuredModel)"
     }
 
     private fun resolveEffectiveModel(profile: AiSpeedProfile, savedModel: String): String {
@@ -823,12 +914,117 @@ $userMessage
         """.trimIndent()
     }
 
+    private fun isAuthOrAppCheckError(e: Throwable): Boolean {
+        val msg = e.localizedMessage.orEmpty().lowercase()
+        return msg.contains("app check") ||
+            msg.contains("appcheck") ||
+            msg.contains("403") ||
+            msg.contains("401") ||
+            msg.contains("permission_denied") ||
+            msg.contains("unauthenticated") ||
+            msg.contains("api key") ||
+            msg.contains("not enabled") ||
+            msg.contains("firebase app")
+    }
+
     companion object {
         const val GEMINI_TTS_MODEL = "gemini-3.1-flash-tts-preview"
 
         fun selectGeminiTtsVoiceName(gender: VoiceGender): String = when (gender) {
             VoiceGender.FEMALE -> "Sulafat"
             VoiceGender.MALE -> "Puck"
+        }
+
+        fun parseWorkerAgentResponse(rawBody: String): Result<Pair<String, ReasoningDecision>> {
+            val trimmed = rawBody.trim()
+            if (trimmed.isBlank()) {
+                return Result.failure(IllegalStateException("Cloudflare Worker returned an empty response"))
+            }
+            val json = runCatching { JSONObject(trimmed) }.getOrNull()
+                ?: return Result.success(
+                    "Online • Cloudflare Worker" to ReasoningDecision(
+                        thoughtSummary = "Analyzed via Cloudflare Worker",
+                        directReply = trimmed.take(2000),
+                        plannedTools = emptyList(),
+                        nextActionNeeded = false
+                    )
+                )
+
+            if (json.has("ok") && !json.optBoolean("ok", true)) {
+                val err = json.optString("error", "Gateway error").replace(Regex("\\s+"), " ").trim().take(140)
+                return Result.failure(IllegalStateException(err.ifBlank { "Gateway error" }))
+            }
+            val explicitError = json.optString("error", "").trim()
+            val nestedResult = json.optJSONObject("result")
+            val nestedData = json.optJSONObject("data")
+            val openAiReply = json.optJSONArray("choices")
+                ?.optJSONObject(0)
+                ?.optJSONObject("message")
+                ?.optString("content", "")
+                ?.trim()
+                .orEmpty()
+
+            val replyText = sequenceOf(
+                json.optString("reply", ""),
+                json.optString("response", ""),
+                json.optString("answer", ""),
+                json.optString("text", ""),
+                json.optString("message", ""),
+                json.optString("output_text", ""),
+                nestedResult?.optString("response", "").orEmpty(),
+                nestedResult?.optString("reply", "").orEmpty(),
+                nestedData?.optString("reply", "").orEmpty(),
+                nestedData?.optString("response", "").orEmpty(),
+                openAiReply
+            ).map { it.trim() }.firstOrNull { it.isNotEmpty() }.orEmpty()
+
+            if (replyText.isEmpty() && explicitError.isNotEmpty()) {
+                return Result.failure(IllegalStateException(explicitError.take(140)))
+            }
+
+            val toolCalls = mutableListOf<PlannedToolCall>()
+            val toolArray = json.optJSONArray("toolCalls")
+            if (toolArray != null) {
+                for (i in 0 until toolArray.length()) {
+                    val obj = toolArray.optJSONObject(i) ?: continue
+                    val toolId = obj.optString("toolId", "").trim()
+                    if (toolId.isBlank()) continue
+                    val argsObjStr = when {
+                        obj.has("argsJson") -> obj.optString("argsJson", "{}")
+                        obj.optJSONObject("args") != null -> obj.optJSONObject("args").toString()
+                        else -> "{}"
+                    }
+                    val argsMap = mutableMapOf<String, String>()
+                    runCatching {
+                        val a = JSONObject(argsObjStr.ifBlank { "{}" })
+                        val keys = a.keys()
+                        while (keys.hasNext()) {
+                            val k = keys.next()
+                            argsMap[k] = a.opt(k)?.toString().orEmpty()
+                        }
+                    }
+                    toolCalls += PlannedToolCall(
+                        toolId = toolId,
+                        args = argsMap,
+                        rationale = obj.optString("rationale", "Worker planned tool")
+                    )
+                }
+            }
+
+            val providerName = json.optString("provider", "Cloudflare Worker").ifBlank { "Cloudflare Worker" }
+            val thought = sequenceOf(
+                json.optString("thoughtSummary", ""),
+                json.optString("thought", ""),
+                json.optString("reasoning", "")
+            ).map { it.trim() }.firstOrNull { it.isNotEmpty() } ?: "Analyzed via $providerName"
+
+            val decision = ReasoningDecision(
+                thoughtSummary = thought,
+                directReply = replyText.ifBlank { "Done." },
+                plannedTools = toolCalls,
+                nextActionNeeded = json.optBoolean("nextActionNeeded", false)
+            )
+            return Result.success("Online • Cloudflare ($providerName)" to decision)
         }
     }
 }

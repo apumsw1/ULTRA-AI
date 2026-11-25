@@ -202,8 +202,8 @@ fun SettingsScreen(
                             label = {
                                 Text(
                                     when (mode) {
-                                        AiProviderMode.AUTO -> "Auto"
-                                        AiProviderMode.FIREBASE_AI -> "Gemini"
+                                        AiProviderMode.AUTO -> "Auto (Worker + Gemini)"
+                                        AiProviderMode.FIREBASE_AI -> "Gemini Only"
                                         AiProviderMode.CLOUDFLARE_WORKER -> "Cloudflare"
                                     }
                                 )
@@ -230,6 +230,7 @@ fun SettingsScreen(
                     value = workerUrl,
                     onValueChange = { workerUrl = it },
                     label = { Text("Cloudflare Worker URL (Free Plan Ready)") },
+                    placeholder = { Text(UltraSettings.DEFAULT_WORKER_ENDPOINT) },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -251,7 +252,11 @@ fun SettingsScreen(
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(
-                        onClick = { onUpdateAiConfig(settings.aiProviderMode, settings.geminiModel, workerUrl, workerToken) },
+                        onClick = {
+                            val normalized = UltraSettings.normalizeWorkerEndpoint(workerUrl)
+                            workerUrl = normalized
+                            onUpdateAiConfig(settings.aiProviderMode, settings.geminiModel, normalized, workerToken)
+                        },
                         modifier = Modifier
                             .weight(1f)
                             .height(48.dp)
@@ -259,7 +264,11 @@ fun SettingsScreen(
                         Text("Save AI Config")
                     }
                     OutlinedButton(
-                        onClick = { onTestWorkerConnection(workerUrl, workerToken) },
+                        onClick = {
+                            val normalized = UltraSettings.normalizeWorkerEndpoint(workerUrl)
+                            workerUrl = normalized
+                            onTestWorkerConnection(normalized, workerToken)
+                        },
                         modifier = Modifier
                             .weight(1f)
                             .height(48.dp)

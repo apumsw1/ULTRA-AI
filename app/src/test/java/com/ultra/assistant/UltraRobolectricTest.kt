@@ -300,7 +300,35 @@ class UltraRobolectricTest {
         freshPrefs.edit().clear().commit()
         val settingsRepo = LocalSettingsRepository(context)
         assertEquals("Auto", settingsRepo.language())
+        assertEquals("https://ultra-ai-assistant.ultraloader.workers.dev", settingsRepo.workerEndpoint())
         assertEquals(0f, VoiceAssistantService.voiceLevelFlow.value, 0.001f)
+    }
+
+    @Test
+    fun `worker endpoint normalization and flexible response parsing support custom worker shapes`() {
+        val expected = "https://ultra-ai-assistant.ultraloader.workers.dev"
+        assertEquals(expected, com.ultra.assistant.data.UltraSettings.DEFAULT_WORKER_ENDPOINT)
+        assertEquals(expected, com.ultra.assistant.data.UltraSettings.normalizeWorkerEndpoint("https://ultra-ai-assistant.ultraloader.workers.dev/"))
+        assertEquals(expected, com.ultra.assistant.data.UltraSettings.normalizeWorkerEndpoint("https://ultra-ai-assistant.ultraloader.workers.dev/api/voice"))
+        assertEquals(expected, com.ultra.assistant.data.UltraSettings.normalizeWorkerEndpoint(""))
+        assertEquals(expected, com.ultra.assistant.data.UltraSettings.normalizeWorkerEndpoint("https://example.workers.dev"))
+
+        val standard = com.ultra.assistant.brain.ModelRouter.parseWorkerAgentResponse(
+            """{"ok":true,"provider":"workers-ai","thoughtSummary":"Checked intent","reply":"Hello from Ultra!","toolCalls":[{"toolId":"open_app","argsJson":"{\"appName\":\"YouTube\"}"}]}"""
+        )
+        assertTrue(standard.isSuccess)
+        assertEquals("Hello from Ultra!", standard.getOrThrow().second.directReply)
+        assertEquals("open_app", standard.getOrThrow().second.plannedTools.first().toolId)
+
+        val noOkField = com.ultra.assistant.brain.ModelRouter.parseWorkerAgentResponse(
+            """{"response":"Direct Cloudflare response"}"""
+        )
+        assertTrue(noOkField.isSuccess)
+        assertEquals("Direct Cloudflare response", noOkField.getOrThrow().second.directReply)
+
+        val plainText = com.ultra.assistant.brain.ModelRouter.parseWorkerAgentResponse("Plain text reply")
+        assertTrue(plainText.isSuccess)
+        assertEquals("Plain text reply", plainText.getOrThrow().second.directReply)
     }
 }
 

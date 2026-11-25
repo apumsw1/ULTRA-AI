@@ -15,7 +15,7 @@ import kotlinx.coroutines.flow.map
 private val Context.ultraDataStore: DataStore<Preferences> by preferencesDataStore(name = "ultra_preferences")
 
 enum class AiProviderMode(val label: String) {
-    AUTO("Auto (Firebase AI + Cloudflare Fallback)"),
+    AUTO("Auto (Cloudflare Worker + Firebase AI Fallback)"),
     FIREBASE_AI("Firebase AI Logic (Gemini)"),
     CLOUDFLARE_WORKER("Cloudflare Worker Gateway")
 }
@@ -82,6 +82,24 @@ data class UltraSettings(
 ) {
     companion object {
         const val DEFAULT_WORKER_ENDPOINT = "https://ultra-ai-assistant.ultraloader.workers.dev"
+
+        fun normalizeWorkerEndpoint(raw: String?): String {
+            var clean = raw?.trim().orEmpty()
+            while (clean.endsWith("/")) {
+                clean = clean.dropLast(1)
+            }
+            for (suffix in listOf("/api/voice", "/api/transcribe", "/api/tts", "/health")) {
+                if (clean.endsWith(suffix, ignoreCase = true)) {
+                    clean = clean.dropLast(suffix.length).trimEnd('/')
+                }
+            }
+            val lower = clean.lowercase()
+            val isLegacyPlaceholder = clean.isBlank() ||
+                (!lower.startsWith("http://") && !lower.startsWith("https://")) ||
+                lower.contains("example.workers.dev") ||
+                lower.contains("your-worker")
+            return if (isLegacyPlaceholder) DEFAULT_WORKER_ENDPOINT else clean
+        }
     }
 }
 
@@ -128,6 +146,12 @@ class LocalSettingsRepository(context: Context) {
         enumValues<AiOperatingMode>().firstOrNull { it.name == prefs.getString("operating_mode", AiOperatingMode.AUTO.name) }
             ?: AiOperatingMode.AUTO
 
+    fun aiProviderMode(): AiProviderMode =
+        enumValues<AiProviderMode>().firstOrNull { it.name == prefs.getString("ai_provider_mode", AiProviderMode.AUTO.name) }
+            ?: AiProviderMode.AUTO
+
+    fun workerEndpoint(): String = UltraSettings.normalizeWorkerEndpoint(prefs.getString("worker_endpoint", null))
+
     fun voiceName(): String? = prefs.getString("voice_name", null)
 
     fun setVoiceSpeedSync(speed: Float) {
@@ -159,6 +183,7 @@ class LocalSettingsRepository(context: Context) {
                 encryptCloudMemory = false
             )
             val cleanName = next.userDisplayName.trim().take(60)
+            val normalizedWorker = UltraSettings.normalizeWorkerEndpoint(next.workerEndpoint)
             data[KEY_USER_DISPLAY_NAME] = cleanName
             data[KEY_LANGUAGE] = next.language
             data[KEY_LANGUAGE_AUTO_DETECT] = next.languageAutoDetect
@@ -172,7 +197,7 @@ class LocalSettingsRepository(context: Context) {
             data[KEY_AI_PROVIDER] = next.aiProviderMode.name
             data[KEY_AI_SPEED_PROFILE] = next.aiSpeedProfile.name
             data[KEY_GEMINI_MODEL] = next.geminiModel
-            data[KEY_WORKER_ENDPOINT] = next.workerEndpoint.trim().ifBlank { UltraSettings.DEFAULT_WORKER_ENDPOINT }
+            data[KEY_WORKER_ENDPOINT] = normalizedWorker
             data[KEY_WORKER_TOKEN] = next.workerAuthToken.trim()
             data[KEY_BG_STYLE] = next.backgroundStyle.name
             data[KEY_THEME_STYLE] = next.uiThemeStyle.name
@@ -198,6 +223,8 @@ class LocalSettingsRepository(context: Context) {
                 .putFloat("voice_pitch", next.voicePitch.coerceIn(0.75f, 1.35f))
                 .putFloat("voice_volume", next.voiceVolume.coerceIn(0.1f, 1.0f))
                 .putString("operating_mode", next.operatingMode.name)
+                .putString("ai_provider_mode", next.aiProviderMode.name)
+                .putString("worker_endpoint", normalizedWorker)
                 .putBoolean("continuous_listening", next.continuousListening)
                 .putBoolean("floating_assistant", next.floatingAssistantEnabled)
                 .putBoolean("ambient_edge_glow", next.ambientEdgeGlowEnabled)
@@ -233,7 +260,7 @@ class LocalSettingsRepository(context: Context) {
             aiProviderMode = provider,
             aiSpeedProfile = speedProfile,
             geminiModel = data[KEY_GEMINI_MODEL] ?: speedProfile.modelId,
-            workerEndpoint = data[KEY_WORKER_ENDPOINT] ?: UltraSettings.DEFAULT_WORKER_ENDPOINT,
+            workerEndpoint = UltraSettings.normalizeWorkerEndpoint(data[KEY_WORKER_ENDPOINT]),
             workerAuthToken = data[KEY_WORKER_TOKEN] ?: "",
             backgroundStyle = bg,
             uiThemeStyle = theme,

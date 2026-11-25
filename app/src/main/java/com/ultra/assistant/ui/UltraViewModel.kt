@@ -444,26 +444,29 @@ class UltraViewModel(
         workerUrl: String,
         workerToken: String = settings.value.workerAuthToken
     ) {
+        val normalizedWorkerUrl = UltraSettings.normalizeWorkerEndpoint(workerUrl)
         val matchingProfile = AiSpeedProfile.entries.firstOrNull { it.modelId == geminiModel }
             ?: settings.value.aiSpeedProfile
+        agentManager.modelRouter.resetSessionRoutingCaches()
         viewModelScope.launch {
             settingsRepository.updateSettings {
                 it.copy(
                     aiProviderMode = mode,
                     aiSpeedProfile = matchingProfile,
                     geminiModel = geminiModel,
-                    workerEndpoint = workerUrl,
+                    workerEndpoint = normalizedWorkerUrl,
                     workerAuthToken = workerToken
                 )
             }
-            _statusBanner.value = "AI Brain configuration updated."
+            _statusBanner.value = "AI Brain & Cloudflare Worker updated."
         }
     }
 
     fun testWorkerConnection(workerUrl: String, workerToken: String) {
+        val normalizedWorkerUrl = UltraSettings.normalizeWorkerEndpoint(workerUrl)
         viewModelScope.launch {
-            _workerHealthStatus.value = "Testing Cloudflare Worker..."
-            val res = agentManager.modelRouter.testWorkerHealth(workerUrl, workerToken)
+            _workerHealthStatus.value = "Testing $normalizedWorkerUrl..."
+            val res = agentManager.modelRouter.testWorkerHealth(normalizedWorkerUrl, workerToken)
             val msg = res.getOrElse { "Failed: ${it.message ?: "unreachable"}" }
             _workerHealthStatus.value = msg
             _statusBanner.value = msg

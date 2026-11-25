@@ -422,18 +422,19 @@ export default {
       return new Response(null, { status: 204, headers: CORS_HEADERS });
     }
 
-    if (url.pathname === "/health" && request.method === "GET") {
+    if ((url.pathname === "/health" || url.pathname === "/") && request.method === "GET") {
       return reply({
         ok: true,
         service: "ULTRA AI Voice & Agent Gateway",
-        version: "2.3.0",
+        version: "2.4.0",
         d1Configured: Boolean(env.DB),
         kvConfigured: Boolean(env.ULTRA_KV),
         providers: {
           workersAi: Boolean(env.AI),
           openai: Boolean(env.OPENAI_API_KEY),
           gemini: Boolean(env.GEMINI_API_KEY),
-          whisper: Boolean(env.AI)
+          whisper: Boolean(env.AI),
+          neuralTts: Boolean(env.GEMINI_API_KEY || env.OPENAI_API_KEY)
         }
       });
     }
@@ -629,7 +630,102 @@ export default {
       }
     }
 
-    if (url.pathname !== "/api/voice" || request.method !== "POST") {
+    if (url.pathname === "/api/tts" && request.method === "POST") {
+      const rate = await checkRateLimit(request, env);
+      if (!rate.allowed) {
+        return reply({ ok: false, error: "Rate limit exceeded. Retry in a minute.", limit: rate.limit }, 429);
+      }
+      if (!env.GEMINI_API_KEY && !env.OPENAI_API_KEY) {
+        return reply({ ok: false, fallback: true, error: "Neural TTS requires GEMINI_API_KEY or OPENAI_API_KEY on Worker." }, 503);
+      }
+      let body;
+      try {
+        body = await request.json();
+      } catch {
+        return reply({ ok: false, error: "Invalid JSON body" }, 400);
+      }
+      const text = String(body.text || "").trim().slice(0, 900);
+      if (!text) return reply({ ok: false, error: "Empty TTS text" }, 400);
+      const gender = String(body.gender || "FEMALE").toUpperCase();
+      const languageHint = String(body.language || "Auto").slice(0, 40);
+
+      try {
+        if (env.GEMINI_API_KEY) {
+          const ttsModel = env.GEMINI_TTS_MODEL || "gemini-3.1-flash-tts-preview";
+          const voiceName = gender === "MALE" ? "Puck" : "Sulafat";
+          const gUrl = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(ttsModel)}:generateContent?key=${encodeURIComponent(env.GEMINI_API_KEY)}`;
+          const res = await fetch(gUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              contents: [{
+                role: "user",
+                parts: [{
+                  text: `Read aloud in a warm, natural, human conversational voice matching the script/language (${languageHint}): ${text}`
+                }]
+              }],
+              generationConfig: {
+                responseModalities: ["AUDIO"],
+                speechConfig: {
+                  voiceConfig: {
+                    prebuiltVoiceConfig: { voiceName }
+                  }
+                }
+              }
+            })
+          });
+          const data = await res.json();
+          if (res.ok) {
+            const parts = data?.candidates?.[0]?.content?.parts || [];
+            const audioPart = parts.find((p) => p?.inlineData?.data);
+            if (audioPart?.inlineData?.data) {
+              return reply({
+                ok: true,
+                provider: `gemini:${ttsModel}`,
+                sampleRate: 24000,
+                audioBase64: audioPart.inlineData.data
+              });
+            }
+          }
+        }
+        if (env.OPENAI_API_KEY) {
+          const oaiVoice = gender === "MALE" ? "onyx" : "nova";
+          const res = await fetch("https://api.openai.com/v1/audio/speech", {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${env.OPENAI_API_KEY}`,
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+              model: env.OPENAI_TTS_MODEL || "tts-1",
+              voice: oaiVoice,
+              input: text,
+              response_format: "pcm"
+            })
+          });
+          if (res.ok) {
+            const buf = new Uint8Array(await res.arrayBuffer());
+            let bin = "";
+            const chunk = 0x8000;
+            for (let i = 0; i < buf.length; i += chunk) {
+              bin += String.fromCharCode(...buf.subarray(i, i + chunk));
+            }
+            return reply({
+              ok: true,
+              provider: "openai:tts-1",
+              sampleRate: 24000,
+              audioBase64: btoa(bin)
+            });
+          }
+        }
+        return reply({ ok: false, fallback: true, error: "Neural TTS unavailable" }, 502);
+      } catch (err) {
+        logStructured("warn", "tts_failed", { message: err?.message || "unknown" });
+        return reply({ ok: false, fallback: true, error: "Neural TTS error" }, 502);
+      }
+    }
+
+    if ((url.pathname !== "/api/voice" && url.pathname !== "/") || request.method !== "POST") {
       return reply({ ok: false, error: "Not found" }, 404);
     }
 

@@ -117,22 +117,45 @@ fun AmbientEdgeGlow(
         label = "edgeBreathe"
     )
 
-    val intensityMultiplier = when (voiceState) {
-        "LISTENING" -> 1.0f
-        "SPEAKING" -> 0.92f
-        "PROCESSING" -> 0.85f
+    val intensityMultiplier = when (voiceState.uppercase()) {
+        "USER_SPEAKING" -> 1.12f
+        "LISTENING", "CONNECTING" -> 0.96f
+        "SPEAKING" -> 0.94f
+        "THINKING", "PROCESSING", "EXECUTING_ACTION", "VERIFYING" -> 0.98f
+        "INTERRUPTED", "RECONNECTING", "OFFLINE" -> 0.78f
+        "ERROR" -> 1.0f
+        "STOPPED", "IDLE" -> 0f
         else -> 0.68f
     }
 
     Canvas(modifier = modifier.fillMaxSize()) {
-        val alpha = 0.34f * visibilityAlpha * breathe * intensityMultiplier
-        val edgeColors = listOf(
-            AmbientLightBlue.copy(alpha = alpha),
-            AmbientCyanTeal.copy(alpha = alpha * 0.95f),
-            AmbientSoftGreen.copy(alpha = alpha),
-            AmbientCyanTeal.copy(alpha = alpha * 0.7f),
-            AmbientLightBlue.copy(alpha = alpha)
-        )
+        val alpha = (0.36f * visibilityAlpha * breathe * intensityMultiplier).coerceIn(0f, 0.55f)
+        if (alpha <= 0.01f) return@Canvas
+        val edgeColors = when (voiceState.uppercase()) {
+            "ERROR" -> listOf(
+                Color(0xFFFF4D6D).copy(alpha = alpha),
+                Color(0xFFFF8FA3).copy(alpha = alpha * 0.7f),
+                Color(0xFFFF4D6D).copy(alpha = alpha)
+            )
+            "THINKING", "PROCESSING" -> listOf(
+                Color(0xFF9D7BFF).copy(alpha = alpha),
+                AmbientCyanTeal.copy(alpha = alpha * 0.95f),
+                AmbientLightBlue.copy(alpha = alpha * 0.9f),
+                Color(0xFF9D7BFF).copy(alpha = alpha)
+            )
+            "RECONNECTING", "OFFLINE", "INTERRUPTED" -> listOf(
+                Color(0xFFFFB347).copy(alpha = alpha),
+                AmbientCyanTeal.copy(alpha = alpha * 0.75f),
+                Color(0xFFFFB347).copy(alpha = alpha)
+            )
+            else -> listOf(
+                AmbientLightBlue.copy(alpha = alpha),
+                AmbientCyanTeal.copy(alpha = alpha * 0.95f),
+                AmbientSoftGreen.copy(alpha = alpha),
+                AmbientCyanTeal.copy(alpha = alpha * 0.75f),
+                AmbientLightBlue.copy(alpha = alpha)
+            )
+        }
         val softHaloStroke = 14.dp.toPx()
         val crispRimStroke = 2.5.dp.toPx()
         val corner = CornerRadius(26.dp.toPx(), 26.dp.toPx())
@@ -142,7 +165,6 @@ fun AmbientEdgeGlow(
                 colors = edgeColors,
                 center = Offset(size.width / 2f, size.height / 2f)
             )
-            // Outer low-brightness atmospheric edge diffusion
             drawRoundRect(
                 brush = brush,
                 topLeft = Offset(2f, 2f),
@@ -150,7 +172,6 @@ fun AmbientEdgeGlow(
                 cornerRadius = corner,
                 style = Stroke(width = softHaloStroke)
             )
-            // Subtle crisp perimeter rim
             drawRoundRect(
                 brush = brush,
                 topLeft = Offset(crispRimStroke / 2f, crispRimStroke / 2f),

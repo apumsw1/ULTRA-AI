@@ -30,16 +30,24 @@ class TaskExecutor(
         }
 
         val settings = settingsRepository.settingsFlow.first()
+        val isDestructiveEmailAction = tool.id == "manage_email" &&
+            args["action"]?.lowercase()?.let { it.contains("delete") || it.contains("trash") || it.contains("remove") } == true
+
         val needsGate = when {
             userConfirmed -> false
+            isDestructiveEmailAction -> true
             tool.id == "prepare_sms" -> settings.requireSmsConfirmation
             tool.id == "make_phone_call" -> settings.requireCallConfirmation
             tool.riskLevel == RiskLevel.HIGH -> true
             else -> false
         }
         if (needsGate) {
-            val summary = "Confirmation required before executing ${tool.title}."
-            memoryManager.recordAuditLog(tool.id, tool.riskLevel.name, "AWAITING_CONFIRMATION", summary, verified = false)
+            val summary = if (isDestructiveEmailAction) {
+                "Confirmation required before deleting an email."
+            } else {
+                "Confirmation required before executing ${tool.title}."
+            }
+            memoryManager.recordAuditLog(tool.id, "HIGH", "AWAITING_CONFIRMATION", summary, verified = false)
             return ToolExecutionResult(
                 toolId = tool.id,
                 success = false,

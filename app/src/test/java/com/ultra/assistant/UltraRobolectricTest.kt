@@ -12,9 +12,12 @@ import com.ultra.assistant.control.BrowserController
 import com.ultra.assistant.data.LocalSettingsRepository
 import com.ultra.assistant.firebase.CloudSyncRepository
 import com.ultra.assistant.memory.MemoryManager
+import com.ultra.assistant.tools.PermissionRequirement
+import com.ultra.assistant.tools.TaskExecutor
 import com.ultra.assistant.tools.ToolRegistry
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -43,13 +46,13 @@ class UltraRobolectricTest {
     }
 
     @Test
-    fun `tool registry validates all 19 tools and rejects bad params`() {
+    fun `tool registry validates all 21 tools and rejects bad params`() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val settingsRepo = LocalSettingsRepository(context)
         val memoryMgr = MemoryManager(context, settingsRepo, CloudSyncRepository(context))
         val registry = ToolRegistry(context, memoryMgr, settingsRepo)
 
-        assertEquals(19, registry.allTools().size)
+        assertEquals(21, registry.allTools().size)
 
         val openApp = registry.getTool("open_app")!!
         assertNotNull(openApp.validateArgs(emptyMap()))
@@ -82,6 +85,20 @@ class UltraRobolectricTest {
         val navTool = registry.getTool("navigate_system")!!
         assertNotNull(navTool.validateArgs(emptyMap()))
         assertNull(navTool.validateArgs(mapOf("action" to "home")))
+
+        val scrollTool = registry.getTool("scroll_screen")!!
+        assertNull(scrollTool.validateArgs(mapOf("direction" to "left")))
+        assertNull(scrollTool.validateArgs(mapOf("direction" to "right")))
+        assertNotNull(scrollTool.validateArgs(mapOf("direction" to "diagonal")))
+
+        val readAloudTool = registry.getTool("read_screen_aloud")!!
+        assertNull(readAloudTool.validateArgs(emptyMap()))
+
+        val emailTool = registry.getTool("manage_email")!!
+        assertNotNull(emailTool.validateArgs(emptyMap()))
+        assertNull(emailTool.validateArgs(mapOf("action" to "read_email")))
+        assertNull(emailTool.validateArgs(mapOf("action" to "delete_email")))
+        assertNotNull(emailTool.validateArgs(mapOf("action" to "delete_all")))
     }
 
     @Test
@@ -240,6 +257,40 @@ class UltraRobolectricTest {
         agent.memoryManager.recordConversationTurn("user", "Remember topic alpha", "en")
         settingsRepo.updateSettings { it.copy(operatingMode = com.ultra.assistant.data.AiOperatingMode.AUTO) }
         assertTrue(agent.contextManager.getRecentHistoryPairs(5).any { it.second.contains("alpha") })
+    }
+
+    @Test
+    fun `task executor enforces confirmation for email delete and accessibility checks for screen tools`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val settingsRepo = LocalSettingsRepository(context)
+        val memoryMgr = MemoryManager(context, settingsRepo, CloudSyncRepository(context))
+        val registry = ToolRegistry(context, memoryMgr, settingsRepo)
+        val executor = TaskExecutor(registry, memoryMgr, settingsRepo)
+
+        val deleteGate = executor.executeTool(
+            toolId = "manage_email",
+            args = mapOf("action" to "delete_email"),
+            userConfirmed = false
+        )
+        assertFalse(deleteGate.success)
+        assertTrue(deleteGate.requiresConfirmation)
+        assertTrue(deleteGate.summary.contains("Confirmation required"))
+
+        val bulkBlocked = executor.executeTool(
+            toolId = "manage_email",
+            args = mapOf("action" to "delete_all_emails"),
+            userConfirmed = true
+        )
+        assertFalse(bulkBlocked.success)
+        assertFalse(bulkBlocked.requiresConfirmation)
+
+        val readResult = executor.executeTool("read_screen_aloud", emptyMap())
+        assertFalse(readResult.success)
+        assertEquals(PermissionRequirement.ACCESSIBILITY, readResult.missingPermission)
+
+        val swipeResult = executor.executeTool("scroll_screen", mapOf("direction" to "left"))
+        assertFalse(swipeResult.success)
+        assertEquals(PermissionRequirement.ACCESSIBILITY, swipeResult.missingPermission)
     }
 }
 

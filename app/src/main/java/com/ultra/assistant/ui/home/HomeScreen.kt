@@ -140,7 +140,7 @@ fun HomeScreen(
 
     val effectiveOnline = settings.operatingMode != AiOperatingMode.OFFLINE && isOnline
     val speaking = voiceState.equals("SPEAKING", true)
-    val listening = isServiceRunning && voiceState.equals("LISTENING", true)
+    val listening = isServiceRunning && (voiceState.equals("LISTENING", true) || voiceState.equals("USER_SPEAKING", true))
 
     val grantedCount = listOf(
         permissions.microphoneGranted && permissions.notificationsGranted,

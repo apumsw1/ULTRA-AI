@@ -223,8 +223,10 @@ fun UltraAuthenticatedShell(
     val statusBanner by viewModel.statusBanner.collectAsStateWithLifecycle()
 
     var isServiceRunning by remember { mutableStateOf(VoiceAssistantService.isRunning) }
+    var isSessionListening by remember { mutableStateOf(VoiceAssistantService.isSessionListening) }
     var voiceState by remember { mutableStateOf(VoiceAssistantService.currentState) }
     var voiceLevel by remember { mutableFloatStateOf(0f) }
+    var audioHardwareSummary by remember { mutableStateOf(VoiceAssistantService.latestHardwareStatus.summaryLabel()) }
     var partialTranscript by remember { mutableStateOf("") }
     var lastRecognizedText by remember { mutableStateOf("") }
     var lastAgentReply by remember { mutableStateOf("") }
@@ -244,7 +246,9 @@ fun UltraAuthenticatedShell(
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 isServiceRunning = VoiceAssistantService.isRunning
+                isSessionListening = VoiceAssistantService.isSessionListening
                 voiceState = VoiceAssistantService.currentState
+                audioHardwareSummary = VoiceAssistantService.latestHardwareStatus.summaryLabel()
                 viewModel.refreshSystemState()
             }
         }
@@ -259,6 +263,7 @@ fun UltraAuthenticatedShell(
                     VoiceAssistantService.BROADCAST_VOICE_STATE -> {
                         voiceState = intent.getStringExtra("state") ?: "IDLE"
                         isServiceRunning = VoiceAssistantService.isRunning
+                        isSessionListening = VoiceAssistantService.isSessionListening
                     }
                     VoiceAssistantService.BROADCAST_VOICE_PARTIAL -> {
                         partialTranscript = intent.getStringExtra("text").orEmpty()
@@ -273,6 +278,9 @@ fun UltraAuthenticatedShell(
                     VoiceAssistantService.BROADCAST_AGENT_REPLY -> {
                         lastAgentReply = intent.getStringExtra("reply").orEmpty()
                     }
+                    VoiceAssistantService.BROADCAST_AUDIO_STATUS -> {
+                        audioHardwareSummary = intent.getStringExtra("summary").orEmpty()
+                    }
                 }
             }
         }
@@ -282,6 +290,7 @@ fun UltraAuthenticatedShell(
             addAction(VoiceAssistantService.BROADCAST_VOICE_TEXT)
             addAction(VoiceAssistantService.BROADCAST_VOICE_LEVEL)
             addAction(VoiceAssistantService.BROADCAST_AGENT_REPLY)
+            addAction(VoiceAssistantService.BROADCAST_AUDIO_STATUS)
         }
         ContextCompat.registerReceiver(context, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
         onDispose { runCatching { context.unregisterReceiver(receiver) } }
@@ -348,13 +357,19 @@ fun UltraAuthenticatedShell(
     }
 
     val stopVoiceAssistant: () -> Unit = {
+        val action = if (settings.floatingAssistantEnabled) {
+            VoiceAssistantService.ACTION_PAUSE_SESSION
+        } else {
+            VoiceAssistantService.ACTION_STOP
+        }
         runCatching {
-            context.startService(Intent(context, VoiceAssistantService::class.java).setAction(VoiceAssistantService.ACTION_STOP))
+            context.startService(Intent(context, VoiceAssistantService::class.java).setAction(action))
         }.onFailure {
             runCatching { context.stopService(Intent(context, VoiceAssistantService::class.java)) }
         }
-        isServiceRunning = false
-        voiceState = "IDLE"
+        isSessionListening = false
+        if (!settings.floatingAssistantEnabled) isServiceRunning = false
+        voiceState = if (settings.floatingAssistantEnabled) "STOPPED" else "IDLE"
     }
 
     val interruptVoiceAssistant: () -> Unit = {
@@ -561,7 +576,7 @@ fun UltraAuthenticatedShell(
                         ) {
                             composable(UltraRoutes.HOME) {
                                 HomeScreen(
-                                    isServiceRunning = isServiceRunning,
+                                    isServiceRunning = isSessionListening,
                                     voiceState = voiceState,
                                     partialTranscript = partialTranscript,
                                     isOnline = isOnline,
@@ -627,8 +642,10 @@ fun UltraAuthenticatedShell(
                             composable(UltraRoutes.VOICE) {
                                 VoiceScreen(
                                     isServiceRunning = isServiceRunning,
+                                    isSessionListening = isSessionListening,
                                     voiceState = voiceState,
                                     voiceLevel = voiceLevel,
+                                    audioHardwareSummary = audioHardwareSummary,
                                     partialTranscript = partialTranscript,
                                     lastRecognizedText = lastRecognizedText,
                                     lastAgentReply = lastAgentReply,
@@ -772,7 +789,7 @@ fun UltraAuthenticatedShell(
 
         // Subtle animated edge glow around perimeter while active
         AmbientEdgeGlow(
-            isActive = isServiceRunning || isBusy || isStreaming,
+            isActive = isSessionListening || isBusy || isStreaming || voiceState == "SPEAKING" || voiceState == "ERROR",
             voiceState = voiceState,
             enabled = settings.ambientEdgeGlowEnabled
         )

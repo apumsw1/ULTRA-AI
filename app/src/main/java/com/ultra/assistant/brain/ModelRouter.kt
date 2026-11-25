@@ -71,9 +71,26 @@ class ModelRouter(
         optionalProperties = listOf("nextActionNeeded")
     )
 
+    private val transcriptionSchema = Schema.obj(
+        properties = mapOf(
+            "transcript" to Schema.string(description = "Verbatim speech transcript in original spoken script(s): Bengali, Hindi, English, or mixed Banglish/Hinglish. Empty string if only noise or silence."),
+            "detectedLanguage" to Schema.string(description = "Detected language code: bn, hi, en, or mixed")
+        )
+    )
+
     private val defaultGeminiPlanner by lazy { createPlannerModel("gemini-3.8-flash") }
     private val liteGeminiPlanner by lazy { createPlannerModel("gemini-3.5-flash-lite") }
     private val argonGeminiPlanner by lazy { createPlannerModel("gemini-4-argon") }
+
+    private val audioTranscriberModel by lazy {
+        Firebase.ai.generativeModel(
+            modelName = "gemini-3.5-flash-lite",
+            generationConfig = generationConfig {
+                responseMimeType = "application/json"
+                responseSchema = transcriptionSchema
+            }
+        )
+    }
 
     private val defaultStreamingModel by lazy { createStreamingModel("gemini-3.8-flash") }
     private val liteStreamingModel by lazy { createStreamingModel("gemini-3.5-flash-lite") }
@@ -97,6 +114,55 @@ class ModelRouter(
             )
         }
     )
+
+    suspend fun transcribeMultilingualAudio(
+        wavBytes: ByteArray,
+        languageHint: String = "Auto"
+    ): Result<Pair<String, String>> {
+        if (wavBytes.size <= 44) {
+            return Result.failure(IllegalArgumentException("Empty audio buffer"))
+        }
+        if (networkMonitor != null && !networkMonitor.checkCurrentConnectivity()) {
+            val msg = "No internet connection"
+            _onlineDiagnostic.value = msg
+            return Result.failure(IllegalStateException(msg))
+        }
+        val firebaseReady = runCatching { FirebaseApp.getInstance() }.isSuccess
+        if (!firebaseReady) {
+            return Result.failure(IllegalStateException("Firebase AI not initialized"))
+        }
+        return try {
+            val response = withTimeout(20_000L) {
+                audioTranscriberModel.generateContent(
+                    content {
+                        inlineData(wavBytes, "audio/wav")
+                        text(
+                            "Transcribe this user voice command verbatim in the exact spoken language(s) " +
+                                "(English, Bengali in Bengali script or Banglish, Hindi in Devanagari or Hinglish, or mixed code-switching). " +
+                                "User language preference hint: $languageHint. " +
+                                "If the clip contains only background noise, fan hum, silence, or unclear audio, return an empty transcript string."
+                        )
+                    }
+                )
+            }
+            val raw = response.text ?: return Result.failure(IllegalStateException("Empty transcription"))
+            val obj = JSONObject(raw)
+            val transcript = obj.optString("transcript", "").trim()
+            val lang = obj.optString("detectedLanguage", "en").trim().ifBlank { "en" }
+            _onlineDiagnostic.value = "Connected (Multilingual Audio)"
+            Result.success(transcript to lang)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: TimeoutCancellationException) {
+            val msg = "Audio transcription timed out"
+            _onlineDiagnostic.value = msg
+            Result.failure(IllegalStateException(msg))
+        } catch (e: Exception) {
+            val msg = sanitizeOnlineError(e.localizedMessage ?: "Audio transcription failed")
+            _onlineDiagnostic.value = msg
+            Result.failure(IllegalStateException(msg))
+        }
+    }
 
     override suspend fun reasonAndPlan(
         userMessage: String,
@@ -592,9 +658,12 @@ You are ULTRA AI, a warm, intelligent, human-like Android assistant and autonomo
 ${userNameNote}Preferred language: $languageLabel (respond naturally in Bengali, Hindi, English, or Banglish matching the user; avoid Markdown symbols like ** or # so voice playback sounds natural).
 $reasoningInstruction
 For tasks inside an app (e.g. "open YouTube and search...", "open Facebook and scroll...", "open Settings and turn on..."):
-- First call `open_app` (or `open_device_settings`) AND set `nextActionNeeded = true` so ULTRA AI waits for the app window, inspects Accessibility nodes, and executes the follow-up clicks/typing/scrolling autonomously.
-- For direct YouTube video queries where fast deep-link works, `search_youtube` may also be used.
-Never claim you completed a device action unless you schedule the corresponding tool in toolCalls.
+- First call `open_app` (or `open_device_settings`) AND set `nextActionNeeded = true` so ULTRA AI waits for the app window, inspects Accessibility nodes, and executes follow-up clicks/typing/scrolling autonomously.
+- Use `read_screen_aloud` when asked to read what is on screen or summarize the visible page/email.
+- Use `scroll_screen` with `'down'`, `'up'`, `'left'`, or `'right'`.
+- Email safety rules: use `manage_email` (`open_email`, `read_email`, `next_email`, `go_back`, `delete_email`). NEVER delete emails proactively and NEVER bulk-delete emails; only schedule `delete_email` when the user explicitly asks to delete a specific open email (the system will enforce confirmation).
+- Context-aware "Next": if user is in an email screen, advance to the next email; if listening to media, skip track; if browsing feeds/videos, scroll or tap Next.
+- Never claim you completed a device action unless you schedule the corresponding tool in toolCalls.
 
 Temporary Session Context:
 $memoryContext

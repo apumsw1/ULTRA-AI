@@ -28,6 +28,10 @@ data class AccessibleScreenSnapshot(
     val packageName: String,
     val windowTitle: String,
     val elements: List<AccessibleUiElement>,
+    val isEmailScreen: Boolean = false,
+    val hasSearchField: Boolean = false,
+    val hasSearchButton: Boolean = false,
+    val emailSummary: String = "",
     val capturedAtMillis: Long = System.currentTimeMillis()
 )
 
@@ -79,13 +83,75 @@ class UltraAccessibilityService : AccessibilityService() {
             )
         }
         val elements = mutableListOf<AccessibleUiElement>()
-        collectNodes(root, elements, maxNodes = 80)
+        collectNodes(root, elements, maxNodes = 100)
         val title = elements.firstOrNull { it.text.isNotBlank() }?.text ?: pkg
+        val isEmail = isEmailPackageOrScreen(pkg, elements)
+        val hasSearchField = elements.any { elem ->
+            elem.editable && listOf(elem.text, elem.contentDescription, elem.viewId)
+                .any { it.contains("search", ignoreCase = true) || it.contains("সার্চ", ignoreCase = true) }
+        }
+        val hasSearchButton = elements.any { elem ->
+            elem.clickable && listOf(elem.text, elem.contentDescription, elem.viewId)
+                .any { it.contains("search", ignoreCase = true) || it.contains("সার্চ", ignoreCase = true) }
+        }
+        val emailSummary = if (isEmail) buildEmailSummary(elements) else ""
         return AccessibleScreenSnapshot(
             packageName = pkg,
             windowTitle = title,
-            elements = elements
+            elements = elements,
+            isEmailScreen = isEmail,
+            hasSearchField = hasSearchField,
+            hasSearchButton = hasSearchButton,
+            emailSummary = emailSummary
         )
+    }
+
+    fun readScreenSummaryAloud(): AccessibilityActionResult {
+        val snap = captureCurrentSnapshot()
+            ?: return AccessibilityActionResult(false, "No readable active window is available.")
+        if (snap.elements.isEmpty()) {
+            return AccessibilityActionResult(false, "Current screen (${snap.packageName}) is protected or has no readable text.")
+        }
+        if (snap.isEmailScreen && snap.emailSummary.isNotBlank()) {
+            return AccessibilityActionResult(
+                success = true,
+                message = snap.emailSummary,
+                affectedElement = snap.packageName
+            )
+        }
+        val lines = snap.elements
+            .mapNotNull { elem ->
+                val raw = elem.text.ifBlank { elem.contentDescription }.trim()
+                raw.takeIf { it.length >= 2 }
+            }
+            .distinct()
+            .take(14)
+        val body = if (lines.isEmpty()) {
+            "On ${snap.windowTitle}, ${snap.elements.size} interactive controls are visible."
+        } else {
+            lines.joinToString(". ")
+        }
+        return AccessibilityActionResult(
+            success = true,
+            message = "Screen (${snap.windowTitle}): $body",
+            affectedElement = snap.packageName
+        )
+    }
+
+    fun clickNextInApp(): AccessibilityActionResult {
+        val root = rootInActiveWindow ?: return AccessibilityActionResult(false, "No active window available.")
+        val pkg = root.packageName?.toString().orEmpty()
+        if (isProtectedPackage(pkg)) {
+            return AccessibilityActionResult(false, "Action blocked on protected screen ($pkg).")
+        }
+        val nextCandidates = listOf("Next", "Older", "Skip", "পরের", "পরবর্তী", "अगला")
+        for (label in nextCandidates) {
+            val match = findMatchingNode(root, label, "")
+            if (match != null) {
+                return clickByTextOrId(label)
+            }
+        }
+        return scrollScreen("down")
     }
 
     fun clickByTextOrId(query: String, viewId: String = ""): AccessibilityActionResult {
@@ -107,7 +173,6 @@ class UltraAccessibilityService : AccessibilityService() {
         return if (ok) {
             AccessibilityActionResult(true, "Clicked '$label'.", label)
         } else {
-            // Fallback to coordinate tap at node center if clickable hierarchy didn't accept ACTION_CLICK
             val rect = Rect()
             target.getBoundsInScreen(rect)
             if (!rect.isEmpty && performTap(rect.exactCenterX(), rect.exactCenterY())) {
@@ -184,21 +249,22 @@ class UltraAccessibilityService : AccessibilityService() {
         if (isProtectedPackage(pkg)) {
             return AccessibilityActionResult(false, "Scrolling blocked on protected screen ($pkg).")
         }
-        val dirLower = direction.lowercase()
-        val isUp = dirLower in setOf("up", "backward", "prev")
-        val action = if (isUp) {
+        val dirLower = direction.lowercase().trim()
+        val isHorizontal = dirLower in setOf("left", "right")
+        val isBackward = dirLower in setOf("up", "backward", "prev", "left")
+        val action = if (isBackward) {
             AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
         } else {
             AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
         }
-        val scrollable = findBestScrollableNode(root)
+        val scrollable = findBestScrollableNode(root, preferHorizontal = isHorizontal)
         if (scrollable != null && scrollable.performAction(action)) {
-            return AccessibilityActionResult(true, "Scrolled $direction.")
+            return AccessibilityActionResult(true, "Scrolled $dirLower.")
         }
-        if (performScrollGesture(if (isUp) "up" else "down")) {
-            return AccessibilityActionResult(true, "Scrolled $direction via gesture.")
+        if (performScrollGesture(dirLower)) {
+            return AccessibilityActionResult(true, "Scrolled $dirLower via gesture.")
         }
-        return AccessibilityActionResult(false, "Could not scroll $direction on current screen.")
+        return AccessibilityActionResult(false, "Could not scroll $dirLower on current screen.")
     }
 
     fun navigateBack(): AccessibilityActionResult {
@@ -247,17 +313,69 @@ class UltraAccessibilityService : AccessibilityService() {
         val metrics = resources.displayMetrics
         val w = metrics.widthPixels.toFloat().coerceAtLeast(320f)
         val h = metrics.heightPixels.toFloat().coerceAtLeast(640f)
-        val cx = w * 0.5f
-        val isUp = direction.lowercase() in setOf("up", "backward", "prev")
-        val startY = if (isUp) h * 0.30f else h * 0.74f
-        val endY = if (isUp) h * 0.74f else h * 0.30f
-        val path = Path().apply {
-            moveTo(cx, startY)
-            lineTo(cx, endY)
+        val dir = direction.lowercase().trim()
+        val path = Path()
+        when (dir) {
+            "left" -> {
+                val cy = h * 0.5f
+                path.moveTo(w * 0.22f, cy)
+                path.lineTo(w * 0.78f, cy)
+            }
+            "right" -> {
+                val cy = h * 0.5f
+                path.moveTo(w * 0.78f, cy)
+                path.lineTo(w * 0.22f, cy)
+            }
+            "up", "backward", "prev" -> {
+                val cx = w * 0.5f
+                path.moveTo(cx, h * 0.30f)
+                path.lineTo(cx, h * 0.74f)
+            }
+            else -> {
+                val cx = w * 0.5f
+                path.moveTo(cx, h * 0.74f)
+                path.lineTo(cx, h * 0.30f)
+            }
         }
         val stroke = GestureDescription.StrokeDescription(path, 0L, 280L)
         val gesture = GestureDescription.Builder().addStroke(stroke).build()
         return dispatchGesture(gesture, null, null)
+    }
+
+    private fun isEmailPackageOrScreen(pkg: String, elements: List<AccessibleUiElement>): Boolean {
+        val pkgLower = pkg.lowercase()
+        if (pkgLower in setOf(
+                "com.google.android.gm",
+                "com.microsoft.office.outlook",
+                "com.yahoo.mobile.client.android.mail",
+                "com.samsung.android.email.provider",
+                "com.fsck.k9",
+                "net.thunderbird.android"
+            ) || pkgLower.contains("mail")
+        ) {
+            return true
+        }
+        val combinedLabels = elements.joinToString(" ") { "${it.text} ${it.contentDescription}" }.lowercase()
+        return (combinedLabels.contains("inbox") || combinedLabels.contains("compose")) &&
+            (combinedLabels.contains("reply") || combinedLabels.contains("unread") || combinedLabels.contains("mail"))
+    }
+
+    private fun buildEmailSummary(elements: List<AccessibleUiElement>): String {
+        val textBlocks = elements
+            .mapNotNull { elem ->
+                elem.text.ifBlank { elem.contentDescription }.trim().takeIf { it.length >= 2 }
+            }
+            .distinct()
+            .filterNot { label ->
+                label.equals("Search in mail", ignoreCase = true) ||
+                    label.equals("Navigate up", ignoreCase = true)
+            }
+            .take(12)
+        return if (textBlocks.isEmpty()) {
+            "Email screen is open, but no visible message lines are readable yet."
+        } else {
+            "Email screen summary: ${textBlocks.joinToString(". ")}"
+        }
     }
 
     private fun collectNodes(
@@ -275,8 +393,8 @@ class UltraAccessibilityService : AccessibilityService() {
             val viewId = node.viewIdResourceName.orEmpty()
             if (text.isNotBlank() || desc.isNotBlank() || node.isClickable || node.isEditable || node.isScrollable) {
                 out += AccessibleUiElement(
-                    text = text.take(120),
-                    contentDescription = desc.take(120),
+                    text = text.take(140),
+                    contentDescription = desc.take(140),
                     viewId = viewId,
                     className = node.className?.toString()?.substringAfterLast('.').orEmpty(),
                     clickable = node.isClickable,
@@ -366,7 +484,10 @@ class UltraAccessibilityService : AccessibilityService() {
         return null
     }
 
-    private fun findBestScrollableNode(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+    private fun findBestScrollableNode(
+        root: AccessibilityNodeInfo,
+        preferHorizontal: Boolean = false
+    ): AccessibilityNodeInfo? {
         var bestNode: AccessibilityNodeInfo? = null
         var bestScore = Long.MIN_VALUE
 
@@ -376,9 +497,12 @@ class UltraAccessibilityService : AccessibilityService() {
                 current.getBoundsInScreen(rect)
                 if (!rect.isEmpty) {
                     val area = rect.width().toLong() * rect.height().toLong()
-                    // Strongly prefer tall vertical containers (like main feeds) over horizontal carousels (like Stories trays)
-                    val verticalBonus = if (rect.height() >= rect.width() * 0.85f) 1_000_000_000L else 0L
-                    val score = verticalBonus + area
+                    val orientationBonus = if (preferHorizontal) {
+                        if (rect.width() >= rect.height() * 0.85f) 1_000_000_000L else 0L
+                    } else {
+                        if (rect.height() >= rect.width() * 0.85f) 1_000_000_000L else 0L
+                    }
+                    val score = orientationBonus + area
                     if (score > bestScore) {
                         bestScore = score
                         bestNode = current

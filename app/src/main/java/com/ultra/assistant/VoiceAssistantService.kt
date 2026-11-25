@@ -21,25 +21,32 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import com.ultra.assistant.brain.AgentManager
 import com.ultra.assistant.brain.IntentEngine
+import com.ultra.assistant.control.ScreenController
 import com.ultra.assistant.data.AiOperatingMode
 import com.ultra.assistant.data.LocalSettingsRepository
 import com.ultra.assistant.data.NetworkMonitor
 import com.ultra.assistant.permissions.PermissionManager
+import com.ultra.assistant.voice.AudioHardwareStatus
+import com.ultra.assistant.voice.ContinuousAudioCaptureEngine
 import com.ultra.assistant.voice.LanguageManager
+import com.ultra.assistant.voice.SentenceStreamExtractor
 import com.ultra.assistant.voice.VoiceAudioController
 import com.ultra.assistant.voice.WakeWordEngine
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicLong
 
 class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
 
     companion object {
         const val ACTION_START = "com.ultra.assistant.START_VOICE"
         const val ACTION_START_SINGLE_TURN = "com.ultra.assistant.START_SINGLE_TURN"
+        const val ACTION_PAUSE_SESSION = "com.ultra.assistant.PAUSE_SESSION"
         const val ACTION_STOP = "com.ultra.assistant.STOP_VOICE"
         const val ACTION_INTERRUPT = "com.ultra.assistant.INTERRUPT_VOICE"
         const val ACTION_CANCEL_AGENT = "com.ultra.assistant.CANCEL_AGENT"
@@ -49,6 +56,11 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
         const val ACTION_REFRESH_VOICE = "com.ultra.assistant.REFRESH_VOICE"
         const val ACTION_SHOW_DOT = "SHOW_DOT"
         const val ACTION_HIDE_DOT = "HIDE_DOT"
+        const val ACTION_SCAN_SCREEN = "com.ultra.assistant.SCAN_SCREEN"
+        const val ACTION_READ_SCREEN = "com.ultra.assistant.READ_SCREEN"
+        const val ACTION_SCROLL_SCREEN = "com.ultra.assistant.SCROLL_SCREEN"
+        const val ACTION_SET_MODE_ONLINE = "com.ultra.assistant.SET_MODE_ONLINE"
+        const val ACTION_SET_MODE_OFFLINE = "com.ultra.assistant.SET_MODE_OFFLINE"
         const val EXTRA_SPEAK_TEXT = "text"
 
         const val BROADCAST_VOICE_STATE = "com.ultra.assistant.VOICE_STATE"
@@ -56,31 +68,55 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
         const val BROADCAST_VOICE_PARTIAL = "com.ultra.assistant.VOICE_PARTIAL"
         const val BROADCAST_VOICE_LEVEL = "com.ultra.assistant.VOICE_LEVEL"
         const val BROADCAST_AGENT_REPLY = "com.ultra.assistant.AGENT_REPLY"
+        const val BROADCAST_AUDIO_STATUS = "com.ultra.assistant.AUDIO_STATUS"
 
         @Volatile
         var isRunning = false
             private set
 
         @Volatile
+        var isSessionListening = false
+            private set
+
+        @Volatile
         var currentState: String = "IDLE"
+            private set
+
+        @Volatile
+        var latestHardwareStatus: AudioHardwareStatus = AudioHardwareStatus()
             private set
     }
 
-    private var recognizer: SpeechRecognizer? = null
+    private var offlineRecognizer: SpeechRecognizer? = null
     private var tts: TextToSpeech? = null
     private var ttsReady = false
-    private var listening = false
+
+    @Volatile
     private var speaking = false
-    private var restarting = false
+
+    @Volatile
     private var destroyed = false
+
+    @Volatile
     private var aiRequestInProgress = false
+
+    @Volatile
+    private var streamingResponseInProgress = false
+
+    @Volatile
     private var wakeActivated = false
+
+    @Volatile
     private var singleTurnOnly = false
+
     private var pendingSpeechText: String? = null
     private var activeFinalUtteranceId: String? = null
-    private var consecutiveIdleErrors = 0
+    private val speechGenerationId = AtomicLong(0L)
+
     private var floatingDot: FloatingDot? = null
+    private var captureEngine: ContinuousAudioCaptureEngine? = null
     private var activeAgentJob: Job? = null
+    private var transcriptionJob: Job? = null
 
     private val handler = Handler(Looper.getMainLooper())
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -89,6 +125,7 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
     private lateinit var networkMonitor: NetworkMonitor
     private lateinit var agentManager: AgentManager
     private lateinit var audioController: VoiceAudioController
+    private lateinit var screenController: ScreenController
 
     override fun onCreate() {
         super.onCreate()
@@ -97,11 +134,13 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
         networkMonitor = UltraRuntime.networkMonitor(this)
         agentManager = UltraRuntime.agentManager(this)
         audioController = VoiceAudioController(this)
+        screenController = ScreenController(this)
         floatingDot = FloatingDot(this)
         createNotificationChannel()
 
         if (!PermissionManager.hasMicrophone(this)) {
             isRunning = false
+            isSessionListening = false
             currentState = "IDLE"
             stopSelf()
             return
@@ -118,6 +157,7 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
 
         if (!fgsStarted) {
             isRunning = false
+            isSessionListening = false
             currentState = "IDLE"
             stopSelf()
             return
@@ -125,19 +165,97 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
 
         isRunning = true
         runCatching { tts = TextToSpeech(this, this) }
+        initAudioCaptureEngine()
+        observeNetworkAndAgentPhases()
+
         if (settingsRepository.floatingAssistantEnabled() && PermissionManager.hasOverlay(this)) {
             floatingDot?.show()
+        }
+    }
+
+    private fun observeNetworkAndAgentPhases() {
+        serviceScope.launch {
+            var wasOnline = networkMonitor.isOnline.value
+            networkMonitor.isOnline.collect { nowOnline ->
+                if (!isRunning || destroyed) return@collect
+                val mode = settingsRepository.operatingMode()
+                if (mode == AiOperatingMode.AUTO && isSessionListening) {
+                    if (wasOnline && !nowOnline && !speaking && !aiRequestInProgress) {
+                        sendVoiceState("OFFLINE")
+                    } else if (!wasOnline && nowOnline && !speaking && !aiRequestInProgress) {
+                        sendVoiceState("LISTENING")
+                    }
+                }
+                wasOnline = nowOnline
+            }
+        }
+
+        serviceScope.launch {
+            agentManager.voicePhaseFlow.collect { phase ->
+                if (!isRunning || destroyed || speaking) return@collect
+                if (aiRequestInProgress && phase in setOf("THINKING", "EXECUTING_ACTION", "VERIFYING")) {
+                    sendVoiceState(phase)
+                }
+            }
+        }
+    }
+
+    private fun initAudioCaptureEngine() {
+        captureEngine = ContinuousAudioCaptureEngine(
+            context = this,
+            onSpeechStart = {
+                handler.post {
+                    if (isRunning && !destroyed && isSessionListening && !speaking) {
+                        sendVoiceState("USER_SPEAKING")
+                    }
+                }
+            },
+            onBargeInDetected = {
+                handler.post {
+                    if (isRunning && !destroyed && speaking) {
+                        handleAcousticBargeIn()
+                    }
+                }
+            },
+            onUtteranceReady = { wavBytes ->
+                handler.post {
+                    if (isRunning && !destroyed && isSessionListening) {
+                        handleCapturedUtterance(wavBytes)
+                    }
+                }
+            },
+            onAudioLevel = { visualLevel, _, _ ->
+                if (isRunning && !destroyed) {
+                    sendVoiceLevel(visualLevel)
+                }
+            },
+            onHardwareStatus = { status ->
+                latestHardwareStatus = status
+                handler.post { sendAudioStatus(status) }
+            },
+            onCaptureError = { errMsg ->
+                handler.post {
+                    if (isRunning && !destroyed) {
+                        sendVoiceState("ERROR", errMsg)
+                    }
+                }
+            }
+        ).apply {
+            batteryConsciousMode = settingsRepository.batteryConsciousListening()
         }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val action = intent?.action
 
-        // Allow overlay / speak preview / voice test cleanly
         if (action == ACTION_SHOW_DOT) {
             if (PermissionManager.hasOverlay(this)) {
                 floatingDot?.show()
-                floatingDot?.updateState(currentState)
+                floatingDot?.updateState(
+                    state = currentState,
+                    isVoiceSessionActive = isSessionListening,
+                    edgeGlowEnabled = settingsRepository.ambientEdgeGlowEnabled()
+                )
             }
             return START_STICKY
         }
@@ -152,35 +270,36 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
             return START_NOT_STICKY
         }
 
+        if (action == ACTION_PAUSE_SESSION) {
+            pauseListeningAndSpeechKeepOverlay()
+            return START_STICKY
+        }
+
         if (action == ACTION_STOP_SPEAKING) {
             stopSpeakingOnly()
             return START_STICKY
         }
 
         if (action == ACTION_CANCEL_AGENT) {
-            agentManager.requestStop()
-            activeAgentJob?.cancel()
-            activeAgentJob = null
-            aiRequestInProgress = false
-            sendVoiceState("IDLE")
+            cancelActiveProcessingOnly()
             return START_STICKY
         }
 
         if (action == ACTION_SPEAK_TEXT) {
             val text = intent.getStringExtra(EXTRA_SPEAK_TEXT).orEmpty()
             if (text.isNotBlank()) {
-                singleTurnOnly = true
+                singleTurnOnly = !isSessionListening
                 speak(text)
             }
             return START_STICKY
         }
 
         if (action == ACTION_TEST_VOICE) {
-            singleTurnOnly = true
+            singleTurnOnly = !isSessionListening
             val preview = when (LanguageManager.speechRecognizerTag(settingsRepository.language())) {
                 "bn-IN" -> "হ্যালো! আমি আল্ট্রা এআই। আমার কণ্ঠস্বর এখন সক্রিয়।"
                 "hi-IN" -> "नमस्ते! मैं अल्ट्रा एआई हूँ। मेरी आवाज़ अब तैयार है।"
-                else -> "Hello! I am ULTRA AI. This is how I sound in conversation."
+                else -> "Hello! I am ULTRA AI. This is how I sound in natural conversation."
             }
             speak(preview)
             return START_STICKY
@@ -188,6 +307,43 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
 
         if (action == ACTION_REFRESH_VOICE) {
             applyVoiceSettings()
+            captureEngine?.batteryConsciousMode = settingsRepository.batteryConsciousListening()
+            return START_STICKY
+        }
+
+        if (action == ACTION_SCAN_SCREEN) {
+            handleOverlayQuickCommand("Inspect screen")
+            return START_STICKY
+        }
+
+        if (action == ACTION_READ_SCREEN) {
+            handleOverlayQuickCommand("Read screen aloud")
+            return START_STICKY
+        }
+
+        if (action == ACTION_SCROLL_SCREEN) {
+            val res = screenController.scroll("down")
+            if (!res.success) {
+                speak(res.message)
+            }
+            return START_STICKY
+        }
+
+        if (action == ACTION_SET_MODE_ONLINE) {
+            serviceScope.launch {
+                settingsRepository.updateSettings { it.copy(operatingMode = AiOperatingMode.ONLINE) }
+                sendVoiceState(if (isSessionListening) "LISTENING" else "IDLE")
+                speak("Online AI mode enabled.")
+            }
+            return START_STICKY
+        }
+
+        if (action == ACTION_SET_MODE_OFFLINE) {
+            serviceScope.launch {
+                settingsRepository.updateSettings { it.copy(operatingMode = AiOperatingMode.OFFLINE) }
+                sendVoiceState(if (isSessionListening) "OFFLINE" else "IDLE")
+                speak("Offline AI mode enabled.")
+            }
             return START_STICKY
         }
 
@@ -199,25 +355,18 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
         when (action) {
             ACTION_INTERRUPT -> {
                 singleTurnOnly = !settingsRepository.continuousListening()
-                interruptSpeakingAndListen()
+                isSessionListening = true
+                handleAcousticBargeIn()
             }
             ACTION_START_SINGLE_TURN -> {
                 singleTurnOnly = true
-                consecutiveIdleErrors = 0
-                if (!listening && !aiRequestInProgress) {
-                    if (speaking) {
-                        interruptSpeakingAndListen()
-                    } else {
-                        startListening()
-                    }
-                }
+                isSessionListening = true
+                startContinuousCapture()
             }
             ACTION_START, null -> {
                 singleTurnOnly = !settingsRepository.continuousListening()
-                consecutiveIdleErrors = 0
-                if (!listening && !speaking && !aiRequestInProgress && isRunning) {
-                    startListening()
-                }
+                isSessionListening = true
+                startContinuousCapture()
             }
         }
         return START_STICKY
@@ -229,25 +378,475 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
         applyVoiceSettings()
         tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(id: String?) {}
+
             override fun onDone(id: String?) {
-                if (activeFinalUtteranceId == null || id == activeFinalUtteranceId) {
+                if (!streamingResponseInProgress && (activeFinalUtteranceId == null || id == activeFinalUtteranceId)) {
                     handler.post { finishSpeaking() }
                 }
             }
 
             @Deprecated("Deprecated in Java")
             override fun onError(id: String?) {
-                handler.post { finishSpeaking() }
+                if (!streamingResponseInProgress) {
+                    handler.post { finishSpeaking() }
+                }
             }
 
             override fun onError(id: String?, errorCode: Int) {
-                handler.post { finishSpeaking() }
+                if (!streamingResponseInProgress) {
+                    handler.post { finishSpeaking() }
+                }
             }
         })
         val queued = pendingSpeechText
         if (!queued.isNullOrBlank()) {
             pendingSpeechText = null
             speak(queued)
+        }
+    }
+
+    private fun startContinuousCapture() {
+        if (!isRunning || destroyed) return
+        sendVoiceState("CONNECTING")
+        captureEngine?.assistantSpeaking = speaking
+        captureEngine?.processingTurn = aiRequestInProgress
+        captureEngine?.batteryConsciousMode = settingsRepository.batteryConsciousListening()
+
+        val started = captureEngine?.start() == true
+        if (started) {
+            val initialState = if (isEffectiveOffline()) "OFFLINE" else "LISTENING"
+            sendVoiceState(initialState)
+        } else {
+            isSessionListening = false
+            sendVoiceState("ERROR", "Microphone could not start")
+        }
+    }
+
+    private fun pauseListeningAndSpeechKeepOverlay() {
+        isSessionListening = false
+        speechGenerationId.incrementAndGet()
+        streamingResponseInProgress = false
+        agentManager.requestStop()
+        activeAgentJob?.cancel()
+        activeAgentJob = null
+        transcriptionJob?.cancel()
+        transcriptionJob = null
+        aiRequestInProgress = false
+        captureEngine?.stop()
+        runCatching {
+            offlineRecognizer?.cancel()
+            offlineRecognizer?.destroy()
+        }
+        offlineRecognizer = null
+        runCatching { tts?.stop() }
+        audioController.abandonSpeechFocus()
+        speaking = false
+        activeFinalUtteranceId = null
+        sendVoiceState("STOPPED")
+    }
+
+    private fun cancelActiveProcessingOnly() {
+        speechGenerationId.incrementAndGet()
+        streamingResponseInProgress = false
+        agentManager.requestStop()
+        activeAgentJob?.cancel()
+        activeAgentJob = null
+        transcriptionJob?.cancel()
+        transcriptionJob = null
+        aiRequestInProgress = false
+        captureEngine?.processingTurn = false
+        sendVoiceState(if (isSessionListening) "LISTENING" else "IDLE")
+    }
+
+    private fun handleAcousticBargeIn() {
+        speechGenerationId.incrementAndGet()
+        streamingResponseInProgress = false
+        agentManager.requestStop()
+        activeAgentJob?.cancel()
+        activeAgentJob = null
+        transcriptionJob?.cancel()
+        transcriptionJob = null
+        runCatching { tts?.stop() }
+        audioController.abandonSpeechFocus()
+        speaking = false
+        activeFinalUtteranceId = null
+        aiRequestInProgress = false
+        captureEngine?.assistantSpeaking = false
+        captureEngine?.processingTurn = false
+        wakeActivated = true
+        sendVoiceState("INTERRUPTED")
+        handler.postDelayed({
+            if (isRunning && !destroyed && isSessionListening && !speaking && !aiRequestInProgress) {
+                sendVoiceState("USER_SPEAKING")
+            }
+        }, 140L)
+    }
+
+    private fun stopSpeakingOnly() {
+        speechGenerationId.incrementAndGet()
+        streamingResponseInProgress = false
+        runCatching { tts?.stop() }
+        audioController.abandonSpeechFocus()
+        speaking = false
+        activeFinalUtteranceId = null
+        captureEngine?.assistantSpeaking = false
+        sendVoiceState(if (isSessionListening) "LISTENING" else "IDLE")
+    }
+
+    private fun handleCapturedUtterance(wavBytes: ByteArray) {
+        if (!isRunning || destroyed || aiRequestInProgress) return
+
+        // If device is offline or set to Offline mode, hand off single-shot offline recognition cleanly
+        if (isEffectiveOffline()) {
+            runOfflineSingleTurnRecognition()
+            return
+        }
+
+        val currentGen = speechGenerationId.get()
+        aiRequestInProgress = true
+        captureEngine?.processingTurn = true
+        sendVoiceState("PROCESSING")
+
+        transcriptionJob?.cancel()
+        transcriptionJob = serviceScope.launch {
+            val langHint = settingsRepository.language()
+            val transcriptionResult = agentManager.modelRouter.transcribeMultilingualAudio(wavBytes, langHint)
+            if (!isRunning || destroyed || speechGenerationId.get() != currentGen) {
+                aiRequestInProgress = false
+                captureEngine?.processingTurn = false
+                return@launch
+            }
+
+            transcriptionResult.fold(
+                onSuccess = { (transcript, detectedLang) ->
+                    if (transcript.isBlank()) {
+                        aiRequestInProgress = false
+                        captureEngine?.processingTurn = false
+                        sendVoiceState(if (isSessionListening) "LISTENING" else "IDLE")
+                    } else {
+                        if (settingsRepository.languageAutoDetect() && detectedLang != "mixed") {
+                            val mapped = when (detectedLang.lowercase()) {
+                                "bn" -> "বাংলা"
+                                "hi" -> "हिन्दी"
+                                "en" -> "English"
+                                else -> null
+                            }
+                            if (mapped != null) settingsRepository.setLanguage(mapped)
+                        }
+                        sendRecognizedText(transcript)
+                        processSpokenTranscript(transcript, currentGen)
+                    }
+                },
+                onFailure = { err ->
+                    aiRequestInProgress = false
+                    captureEngine?.processingTurn = false
+                    val msg = err.localizedMessage.orEmpty()
+                    if (msg.contains("internet", ignoreCase = true) || msg.contains("network", ignoreCase = true)) {
+                        if (settingsRepository.operatingMode() == AiOperatingMode.AUTO) {
+                            sendVoiceState("RECONNECTING", msg)
+                            runOfflineSingleTurnRecognition()
+                        } else {
+                            sendVoiceState("ERROR", msg)
+                        }
+                    } else {
+                        sendVoiceState(if (isSessionListening) "LISTENING" else "IDLE", msg)
+                    }
+                }
+            )
+        }
+    }
+
+    private fun runOfflineSingleTurnRecognition() {
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+            val msg = "Offline speech recognizer unavailable on this device."
+            sendVoiceState("OFFLINE", msg)
+            aiRequestInProgress = false
+            captureEngine?.processingTurn = false
+            return
+        }
+        captureEngine?.pauseForOfflineRecognizer()
+        runCatching { offlineRecognizer?.destroy() }
+        offlineRecognizer = runCatching { SpeechRecognizer.createSpeechRecognizer(this) }.getOrNull()
+        val recognizer = offlineRecognizer ?: run {
+            captureEngine?.resumeAfterOfflineRecognizer()
+            sendVoiceState("OFFLINE")
+            return
+        }
+
+        recognizer.setRecognitionListener(object : RecognitionListener {
+            override fun onReadyForSpeech(params: Bundle?) {
+                if (isRunning) sendVoiceState("OFFLINE")
+            }
+
+            override fun onBeginningOfSpeech() {
+                if (isRunning) sendVoiceState("USER_SPEAKING")
+            }
+
+            override fun onRmsChanged(rmsdB: Float) {
+                if (isRunning) sendVoiceLevel(((rmsdB + 2f).coerceIn(0f, 12f)))
+            }
+
+            override fun onBufferReceived(buffer: ByteArray?) {}
+            override fun onEndOfSpeech() {
+                if (isRunning) sendVoiceState("PROCESSING")
+            }
+
+            override fun onError(error: Int) {
+                runCatching { recognizer.destroy() }
+                offlineRecognizer = null
+                aiRequestInProgress = false
+                captureEngine?.processingTurn = false
+                if (isRunning && isSessionListening && !singleTurnOnly) {
+                    captureEngine?.resumeAfterOfflineRecognizer()
+                    sendVoiceState(if (isEffectiveOffline()) "OFFLINE" else "LISTENING")
+                } else {
+                    sendVoiceState("IDLE")
+                }
+            }
+
+            override fun onResults(results: Bundle?) {
+                val spoken = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    ?.firstOrNull()?.trim().orEmpty()
+                runCatching { recognizer.destroy() }
+                offlineRecognizer = null
+                if (spoken.isBlank()) {
+                    aiRequestInProgress = false
+                    captureEngine?.processingTurn = false
+                    if (isRunning && isSessionListening && !singleTurnOnly) {
+                        captureEngine?.resumeAfterOfflineRecognizer()
+                        sendVoiceState(if (isEffectiveOffline()) "OFFLINE" else "LISTENING")
+                    }
+                } else {
+                    sendRecognizedText(spoken)
+                    if (isRunning && isSessionListening && !singleTurnOnly) {
+                        captureEngine?.resumeAfterOfflineRecognizer()
+                    }
+                    processSpokenTranscript(spoken, speechGenerationId.get())
+                }
+            }
+
+            override fun onPartialResults(partialResults: Bundle?) {
+                val partial = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    ?.firstOrNull()?.trim().orEmpty()
+                if (partial.isNotBlank()) sendPartialText(partial)
+            }
+
+            override fun onEvent(eventType: Int, params: Bundle?) {}
+        })
+
+        val tag = LanguageManager.speechRecognizerTag(settingsRepository.language())
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, tag)
+            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1400L)
+        }
+        runCatching {
+            recognizer.startListening(intent)
+        }.onFailure {
+            runCatching { recognizer.destroy() }
+            offlineRecognizer = null
+            if (isSessionListening) captureEngine?.resumeAfterOfflineRecognizer()
+        }
+    }
+
+    private fun handleOverlayQuickCommand(command: String) {
+        if (aiRequestInProgress) return
+        val gen = speechGenerationId.get()
+        processSpokenTranscript(command, gen)
+    }
+
+    private fun processSpokenTranscript(spokenRaw: String, generationAtStart: Long) {
+        val spoken = IntentEngine.normalizeSpeechTranscript(spokenRaw)
+        val wakePhrase = settingsRepository.wakePhrase()
+        val hasWake = WakeWordEngine.detected(spoken, wakePhrase)
+        val commandText = if (hasWake) {
+            WakeWordEngine.strip(spoken, wakePhrase)
+        } else if (wakeActivated) {
+            wakeActivated = false
+            spoken
+        } else {
+            spoken
+        }
+
+        if (hasWake && commandText.isBlank()) {
+            wakeActivated = true
+            aiRequestInProgress = false
+            captureEngine?.processingTurn = false
+            val ack = when (LanguageManager.speechRecognizerTag(settingsRepository.language())) {
+                "bn-IN" -> "জি, বলুন। আমি শুনছি।"
+                "hi-IN" -> "जी, बोलिए। मैं सुन रहा हूँ।"
+                else -> "Yes, I am listening."
+            }
+            speak(ack)
+            return
+        }
+
+        if (IntentEngine.isStopCommand(commandText)) {
+            cancelActiveProcessingOnly()
+            stopSpeakingOnly()
+            sendAgentReply("Stopped.")
+            return
+        }
+
+        aiRequestInProgress = true
+        captureEngine?.processingTurn = true
+        sendVoiceState("THINKING", commandText)
+
+        activeAgentJob?.cancel()
+        activeAgentJob = serviceScope.launch {
+            val streamExtractor = SentenceStreamExtractor()
+            var streamedAnyChunk = false
+            streamingResponseInProgress = true
+
+            val streamCollectorJob = launch {
+                agentManager.streamingReplyFlow.collect { partial ->
+                    if (speechGenerationId.get() != generationAtStart || partial.isBlank()) return@collect
+                    val readySentences = streamExtractor.consumeDelta(partial)
+                    for (sentence in readySentences) {
+                        if (speechGenerationId.get() != generationAtStart) break
+                        speakStreamingSentence(
+                            sentence = sentence,
+                            generationId = generationAtStart,
+                            isFirst = !streamedAnyChunk
+                        )
+                        streamedAnyChunk = true
+                    }
+                }
+            }
+
+            val report = try {
+                agentManager.handleUserCommand(commandText)
+            } catch (e: CancellationException) {
+                streamCollectorJob.cancel()
+                streamingResponseInProgress = false
+                aiRequestInProgress = false
+                captureEngine?.processingTurn = false
+                throw e
+            } catch (_: Exception) {
+                null
+            } finally {
+                streamCollectorJob.cancel()
+                streamingResponseInProgress = false
+            }
+
+            aiRequestInProgress = false
+            captureEngine?.processingTurn = false
+            if (!isRunning || destroyed || speechGenerationId.get() != generationAtStart) {
+                return@launch
+            }
+
+            val reply = report?.finalReply?.takeIf { it.isNotBlank() }
+                ?: "I couldn't process that command right now."
+            sendAgentReply(reply)
+
+            if (streamedAnyChunk) {
+                val remainder = streamExtractor.flushRemainder(reply)
+                if (remainder.isNotBlank()) {
+                    speakStreamingSentence(remainder, generationAtStart, isFirst = false)
+                } else if (tts?.isSpeaking != true) {
+                    finishSpeaking()
+                }
+            } else {
+                speak(reply)
+            }
+        }
+    }
+
+    private fun speakStreamingSentence(sentence: String, generationId: Long, isFirst: Boolean) {
+        if (!isRunning || destroyed || speechGenerationId.get() != generationId) return
+        val engine = tts
+        if (!ttsReady || engine == null) return
+        val clean = audioController.sanitizeForSpeech(sentence)
+        if (clean.isBlank()) return
+
+        if (isFirst) {
+            applyVoiceSettings(detectReplyLanguageOverride(clean))
+            audioController.requestSpeechFocus()
+            speaking = true
+            captureEngine?.assistantSpeaking = true
+            sendVoiceState("SPEAKING", clean)
+        }
+        val uttId = audioController.speakNaturally(
+            tts = engine,
+            rawText = clean,
+            languageSetting = settingsRepository.language(),
+            gender = settingsRepository.voiceGender(),
+            speed = settingsRepository.voiceSpeed(),
+            userPitch = settingsRepository.voicePitch(),
+            volume = settingsRepository.voiceVolume(),
+            preferOffline = isEffectiveOffline(),
+            explicitVoiceName = settingsRepository.voiceName(),
+            flushQueue = isFirst,
+            utterancePrefix = "ultra_stream_$generationId"
+        )
+        if (uttId != null) {
+            activeFinalUtteranceId = uttId
+        }
+    }
+
+    private fun speak(text: String) {
+        if (!isRunning || destroyed) return
+        val engine = tts
+        if (!ttsReady || engine == null) {
+            pendingSpeechText = text
+            return
+        }
+        val clean = audioController.sanitizeForSpeech(text)
+        if (clean.isBlank()) {
+            finishSpeaking()
+            return
+        }
+
+        val currentGen = speechGenerationId.get()
+        applyVoiceSettings(detectReplyLanguageOverride(clean))
+        audioController.requestSpeechFocus()
+        speaking = true
+        captureEngine?.assistantSpeaking = true
+        sendVoiceState("SPEAKING", clean)
+
+        val lastId = audioController.speakNaturally(
+            tts = engine,
+            rawText = clean,
+            languageSetting = settingsRepository.language(),
+            gender = settingsRepository.voiceGender(),
+            speed = settingsRepository.voiceSpeed(),
+            userPitch = settingsRepository.voicePitch(),
+            volume = settingsRepository.voiceVolume(),
+            preferOffline = isEffectiveOffline(),
+            explicitVoiceName = settingsRepository.voiceName(),
+            flushQueue = true,
+            utterancePrefix = "ultra_reply_$currentGen"
+        )
+        activeFinalUtteranceId = lastId
+        if (lastId == null) {
+            finishSpeaking()
+        }
+    }
+
+    private fun detectReplyLanguageOverride(clean: String): String? = when {
+        clean.any { it in '\u0980'..'\u09FF' } -> "বাংলা"
+        clean.any { it in '\u0900'..'\u097F' } -> "हिन्दी"
+        else -> null
+    }
+
+    private fun finishSpeaking() {
+        speaking = false
+        activeFinalUtteranceId = null
+        captureEngine?.assistantSpeaking = false
+        audioController.abandonSpeechFocus()
+        if (singleTurnOnly || !settingsRepository.continuousListening()) {
+            isSessionListening = false
+            captureEngine?.stop()
+            sendVoiceState("IDLE")
+        } else if (isSessionListening) {
+            if (captureEngine?.latestStatus?.captureRunning != true) {
+                captureEngine?.start()
+            }
+            sendVoiceState(if (isEffectiveOffline()) "OFFLINE" else "LISTENING")
+        } else {
+            sendVoiceState("STOPPED")
         }
     }
 
@@ -274,294 +873,38 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
         }
     }
 
-    private fun interruptSpeakingAndListen() {
-        agentManager.requestStop()
-        activeAgentJob?.cancel()
-        activeAgentJob = null
-        runCatching { tts?.stop() }
-        audioController.abandonSpeechFocus()
-        speaking = false
-        activeFinalUtteranceId = null
-        aiRequestInProgress = false
-        wakeActivated = true
-        consecutiveIdleErrors = 0
-        sendVoiceState("LISTENING")
-        startListening()
-    }
-
-    private fun stopSpeakingOnly() {
-        runCatching { tts?.stop() }
-        audioController.abandonSpeechFocus()
-        speaking = false
-        activeFinalUtteranceId = null
-        sendVoiceState("IDLE")
-    }
-
-    private fun setupRecognizer() {
-        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
-            sendVoiceState("OFFLINE", "Speech recognizer unavailable")
-            return
-        }
-        runCatching { recognizer?.destroy() }
-        recognizer = runCatching { SpeechRecognizer.createSpeechRecognizer(this) }.getOrNull()
-        recognizer?.setRecognitionListener(object : RecognitionListener {
-            override fun onReadyForSpeech(params: Bundle?) {
-                if (!isRunning) return
-                listening = true
-                sendVoiceState("LISTENING")
-            }
-
-            override fun onBeginningOfSpeech() {
-                if (!isRunning) return
-                listening = true
-                consecutiveIdleErrors = 0
-                if (speaking) {
-                    runCatching { tts?.stop() }
-                    audioController.abandonSpeechFocus()
-                    speaking = false
-                }
-                sendVoiceState("LISTENING")
-            }
-
-            override fun onRmsChanged(rmsdB: Float) {
-                if (isRunning) sendVoiceLevel(rmsdB)
-            }
-
-            override fun onBufferReceived(buffer: ByteArray?) {}
-
-            override fun onEndOfSpeech() {
-                if (!isRunning) return
-                listening = false
-                sendVoiceState("PROCESSING")
-            }
-
-            override fun onError(error: Int) {
-                if (!isRunning) return
-                listening = false
-                if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
-                    stopVoiceService()
-                    return
-                }
-                sendVoiceState("IDLE")
-
-                if (singleTurnOnly || !settingsRepository.continuousListening()) {
-                    return
-                }
-
-                // Smart exponential backoff avoids repetitive recognizer ting-ting beeps during quiet idle gaps
-                consecutiveIdleErrors += 1
-                if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) {
-                    runCatching {
-                        recognizer?.cancel()
-                        recognizer?.destroy()
-                    }
-                    recognizer = null
-                    restartListening(1600L)
-                    return
-                }
-
-                val delay = when (consecutiveIdleErrors) {
-                    1 -> 900L
-                    2 -> 1800L
-                    3 -> 2800L
-                    else -> 4000L
-                }
-                val maxRetries = if (settingsRepository.batteryConsciousListening()) 4 else 8
-                if (consecutiveIdleErrors <= maxRetries) {
-                    restartListening(delay)
-                }
-            }
-
-            override fun onResults(results: Bundle?) {
-                if (!isRunning) return
-                listening = false
-                consecutiveIdleErrors = 0
-                val spoken = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    ?.firstOrNull()?.trim().orEmpty()
-                if (spoken.isBlank()) {
-                    sendVoiceState("IDLE")
-                    if (!singleTurnOnly && settingsRepository.continuousListening()) {
-                        restartListening(850L)
-                    }
-                } else {
-                    sendRecognizedText(spoken)
-                    processSpokenTranscript(spoken)
-                }
-            }
-
-            override fun onPartialResults(partialResults: Bundle?) {
-                if (!isRunning) return
-                val partial = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    ?.firstOrNull()?.trim().orEmpty()
-                if (partial.isNotBlank()) {
-                    sendPartialText(partial)
-                }
-            }
-
-            override fun onEvent(eventType: Int, params: Bundle?) {}
-        })
-    }
-
-    private fun startListening() {
-        if (!isRunning || destroyed || speaking || listening || aiRequestInProgress) return
-        if (!SpeechRecognizer.isRecognitionAvailable(this)) return
-        if (recognizer == null) setupRecognizer()
-
-        val language = LanguageManager.speechRecognizerTag(settingsRepository.language())
-        val speechIntent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, language)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, language)
-            if (settingsRepository.languageAutoDetect()) {
-                putExtra(RecognizerIntent.EXTRA_ONLY_RETURN_LANGUAGE_PREFERENCE, false)
-            }
-            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1750L)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1150L)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 1200L)
-            if (isEffectiveOffline()) {
-                putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
-            }
-        }
-        try {
-            recognizer?.startListening(speechIntent)
-            listening = true
-            sendVoiceState("LISTENING")
-        } catch (_: Exception) {
-            listening = false
-            if (!singleTurnOnly && settingsRepository.continuousListening()) {
-                restartListening(1500L)
-            }
-        }
-    }
-
-    private fun processSpokenTranscript(spokenRaw: String) {
-        val spoken = IntentEngine.normalizeSpeechTranscript(spokenRaw)
-        val wakePhrase = settingsRepository.wakePhrase()
-        val hasWake = WakeWordEngine.detected(spoken, wakePhrase)
-        val commandText = if (hasWake) {
-            WakeWordEngine.strip(spoken, wakePhrase)
-        } else if (wakeActivated) {
-            wakeActivated = false
-            spoken
-        } else {
-            spoken
-        }
-
-        if (hasWake && commandText.isBlank()) {
-            wakeActivated = true
-            val ack = when (LanguageManager.speechRecognizerTag(settingsRepository.language())) {
-                "bn-IN" -> "জি, বলুন। আমি শুনছি।"
-                "hi-IN" -> "जी, बोलिए। मैं सुन रहा हूँ।"
-                else -> "Yes, I am listening."
-            }
-            speak(ack)
-            return
-        }
-
-        if (IntentEngine.isStopCommand(commandText)) {
-            agentManager.requestStop()
-            activeAgentJob?.cancel()
-            activeAgentJob = null
-            aiRequestInProgress = false
-            stopSpeakingOnly()
-            sendAgentReply("Stopped.")
-            return
-        }
-
-        aiRequestInProgress = true
-        sendVoiceState("PROCESSING", commandText)
-        activeAgentJob?.cancel()
-        activeAgentJob = serviceScope.launch {
-            val report = runCatching {
-                agentManager.handleUserCommand(commandText)
-            }.getOrNull()
-
-            aiRequestInProgress = false
-            if (!isRunning || destroyed) return@launch
-
-            val reply = report?.finalReply?.takeIf { it.isNotBlank() }
-                ?: "I couldn't process that command right now."
-            sendAgentReply(reply)
-            speak(reply)
-        }
-    }
-
-    private fun speak(text: String) {
-        if (!isRunning || destroyed) return
-        val engine = tts
-        if (!ttsReady || engine == null) {
-            pendingSpeechText = text
-            return
-        }
-        val clean = audioController.sanitizeForSpeech(text)
-        if (clean.isBlank()) {
-            sendVoiceState("IDLE")
-            if (!singleTurnOnly && settingsRepository.continuousListening()) {
-                restartListening(750L)
-            }
-            return
-        }
-
-        val detectedSpeechLanguage = when {
-            clean.any { it in '\u0980'..'\u09FF' } -> "Bengali"
-            clean.any { it in '\u0900'..'\u097F' } -> "Hindi"
-            else -> null
-        }
-        applyVoiceSettings(detectedSpeechLanguage)
-        audioController.requestSpeechFocus()
-        speaking = true
-        listening = false
-        sendVoiceState("SPEAKING", clean)
-
-        val lastId = audioController.speakNaturally(
-            tts = engine,
-            rawText = clean,
-            volume = settingsRepository.voiceVolume()
-        )
-        activeFinalUtteranceId = lastId
-        if (lastId == null) {
-            finishSpeaking()
-        }
-    }
-
-    private fun finishSpeaking() {
-        speaking = false
-        activeFinalUtteranceId = null
-        audioController.abandonSpeechFocus()
-        sendVoiceState("IDLE")
-        if (!singleTurnOnly && settingsRepository.continuousListening()) {
-            restartListening(550L)
-        }
-    }
-
-    private fun restartListening(delay: Long) {
-        if (!isRunning || destroyed || restarting || aiRequestInProgress) return
-        restarting = true
-        handler.postDelayed({
-            restarting = false
-            if (isRunning && !destroyed && !speaking && !listening && !aiRequestInProgress) {
-                startListening()
-            }
-        }, delay)
-    }
-
     private fun sendVoiceState(state: String, snippet: String? = null) {
         currentState = state
-        floatingDot?.updateState(state, snippet)
+        floatingDot?.updateState(
+            state = state,
+            snippet = snippet,
+            isVoiceSessionActive = isSessionListening,
+            edgeGlowEnabled = settingsRepository.ambientEdgeGlowEnabled()
+        )
         if (!isRunning) return
         sendBroadcast(Intent(BROADCAST_VOICE_STATE).setPackage(packageName).putExtra("state", state))
     }
 
+    private fun sendAudioStatus(status: AudioHardwareStatus) {
+        if (!isRunning) return
+        sendBroadcast(
+            Intent(BROADCAST_AUDIO_STATUS)
+                .setPackage(packageName)
+                .putExtra("summary", status.summaryLabel())
+                .putExtra("ns_active", status.noiseSuppressorEnabled)
+                .putExtra("aec_active", status.echoCancelerEnabled)
+                .putExtra("clipping", status.clippingDetected)
+        )
+    }
+
     private fun sendRecognizedText(text: String) {
-        floatingDot?.updateState("PROCESSING", text)
+        floatingDot?.updateState("PROCESSING", text, isSessionListening, settingsRepository.ambientEdgeGlowEnabled())
         if (!isRunning) return
         sendBroadcast(Intent(BROADCAST_VOICE_TEXT).setPackage(packageName).putExtra("text", text))
     }
 
     private fun sendPartialText(text: String) {
-        floatingDot?.updateState("LISTENING", text)
+        floatingDot?.updateState("USER_SPEAKING", text, isSessionListening, settingsRepository.ambientEdgeGlowEnabled())
         if (!isRunning) return
         sendBroadcast(Intent(BROADCAST_VOICE_PARTIAL).setPackage(packageName).putExtra("text", text))
     }
@@ -572,7 +915,7 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
     }
 
     private fun sendAgentReply(reply: String) {
-        floatingDot?.updateState("SPEAKING", reply)
+        floatingDot?.updateState("SPEAKING", reply, isSessionListening, settingsRepository.ambientEdgeGlowEnabled())
         if (!isRunning) return
         sendBroadcast(Intent(BROADCAST_AGENT_REPLY).setPackage(packageName).putExtra("reply", reply))
     }
@@ -608,7 +951,7 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
         return NotificationCompat.Builder(this, "ultra_assistant")
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentTitle("ULTRA AI Voice Ready")
-            .setContentText("Natural conversation mode (${settingsRepository.voiceGender().label})")
+            .setContentText("Continuous natural voice (${settingsRepository.voiceGender().label})")
             .setContentIntent(openPending)
             .addAction(android.R.drawable.ic_media_pause, "Stop", stopPending)
             .setOngoing(true)
@@ -619,28 +962,33 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
 
     private fun stopVoiceService() {
         isRunning = false
+        isSessionListening = false
         currentState = "IDLE"
         destroyed = true
+        speechGenerationId.incrementAndGet()
+        streamingResponseInProgress = false
         handler.removeCallbacksAndMessages(null)
         activeAgentJob?.cancel()
         activeAgentJob = null
+        transcriptionJob?.cancel()
+        transcriptionJob = null
         floatingDot?.hide()
         floatingDot = null
+        captureEngine?.destroy()
+        captureEngine = null
         audioController.abandonSpeechFocus()
         runCatching {
-            recognizer?.cancel()
-            recognizer?.destroy()
+            offlineRecognizer?.cancel()
+            offlineRecognizer?.destroy()
         }
-        recognizer = null
+        offlineRecognizer = null
         runCatching {
             tts?.stop()
             tts?.shutdown()
         }
         tts = null
         ttsReady = false
-        listening = false
         speaking = false
-        restarting = false
         aiRequestInProgress = false
         serviceScope.cancel()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
@@ -654,19 +1002,25 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
 
     override fun onDestroy() {
         isRunning = false
+        isSessionListening = false
         currentState = "IDLE"
         destroyed = true
+        speechGenerationId.incrementAndGet()
         handler.removeCallbacksAndMessages(null)
         activeAgentJob?.cancel()
         activeAgentJob = null
+        transcriptionJob?.cancel()
+        transcriptionJob = null
         floatingDot?.hide()
         floatingDot = null
+        captureEngine?.destroy()
+        captureEngine = null
         audioController.abandonSpeechFocus()
         runCatching {
-            recognizer?.cancel()
-            recognizer?.destroy()
+            offlineRecognizer?.cancel()
+            offlineRecognizer?.destroy()
         }
-        recognizer = null
+        offlineRecognizer = null
         runCatching {
             tts?.stop()
             tts?.shutdown()

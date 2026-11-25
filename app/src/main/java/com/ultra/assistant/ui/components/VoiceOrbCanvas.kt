@@ -51,11 +51,13 @@ fun VoiceOrbCanvas(
     )
 
     val (primary, secondary) = when {
-        !isServiceActive -> Color(0xFF4B5C73) to Color(0xFF283445)
-        voiceState == "LISTENING" -> ArcCyan to Color(0xFF3A7DFF)
-        voiceState == "PROCESSING" -> NeuralViolet to Color(0xFFFF4FD8)
-        voiceState == "SPEAKING" -> EmeraldVerified to ArcCyan
-        voiceState == "OFFLINE" -> AmberWarning to Color(0xFFFF6B6B)
+        !isServiceActive || voiceState in setOf("IDLE", "STOPPED") -> Color(0xFF4B5C73) to Color(0xFF283445)
+        voiceState == "USER_SPEAKING" -> Color(0xFF5CF4FF) to ArcCyan
+        voiceState in setOf("LISTENING", "CONNECTING") -> ArcCyan to Color(0xFF3A7DFF)
+        voiceState in setOf("PROCESSING", "THINKING") -> NeuralViolet to Color(0xFFFF4FD8)
+        voiceState in setOf("SPEAKING", "EXECUTING_ACTION", "VERIFYING") -> EmeraldVerified to ArcCyan
+        voiceState in setOf("OFFLINE", "RECONNECTING", "INTERRUPTED") -> AmberWarning to Color(0xFFFF6B6B)
+        voiceState == "ERROR" -> Color(0xFFFF4D6D) to Color(0xFFFF8FA3)
         else -> ArcCyan to NeuralViolet
     }
 

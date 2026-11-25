@@ -18,7 +18,7 @@ class ScreenController(private val context: Context) {
         return Result.success(snapshot)
     }
 
-    fun describeScreenConcise(maxNodes: Int = 30): Result<String> {
+    fun describeScreenConcise(maxNodes: Int = 34): Result<String> {
         return inspectScreen().map { snap ->
             if (snap.elements.isEmpty()) {
                 "Active package: ${snap.packageName} (${snap.windowTitle}). No readable controls exposed."
@@ -32,9 +32,34 @@ class ScreenController(private val context: Context) {
                     }.joinToString(",")
                     "[$label${if (flags.isNotBlank()) " ($flags)" else ""}]"
                 }
-                "Package: ${snap.packageName} | Window: ${snap.windowTitle} | Controls (${snap.elements.size}): $preview"
+                val extraHints = buildList {
+                    if (snap.isEmailScreen) add("EmailScreen")
+                    if (snap.hasSearchField) add("SearchFieldPresent")
+                    if (snap.hasSearchButton) add("SearchButtonPresent")
+                }.joinToString(", ")
+                val hintPrefix = if (extraHints.isNotBlank()) " | Flags: $extraHints" else ""
+                "Package: ${snap.packageName} | Window: ${snap.windowTitle}$hintPrefix | Controls (${snap.elements.size}): $preview"
             }
         }
+    }
+
+    fun readScreenAloud(): AccessibilityActionResult {
+        val service = UltraAccessibilityService.getInstance()
+            ?: return AccessibilityActionResult(false, "Accessibility Service is disabled. Please enable it in Settings.")
+        return service.readScreenSummaryAloud()
+    }
+
+    fun clickNextInApp(): AccessibilityActionResult {
+        val service = UltraAccessibilityService.getInstance()
+            ?: return AccessibilityActionResult(false, "Accessibility Service is disabled. Please enable it in Settings.")
+        return service.clickNextInApp()
+    }
+
+    fun isCurrentlyInEmailApp(): Boolean {
+        return UltraAccessibilityService.latestSnapshotFlow.value?.isEmailScreen == true ||
+            UltraAccessibilityService.activePackageFlow.value.lowercase().let {
+                it.contains("gm") || it.contains("mail") || it.contains("outlook")
+            }
     }
 
     fun clickElement(text: String, viewId: String = ""): AccessibilityActionResult {

@@ -372,11 +372,69 @@ class ReasoningEngine(
                 "Checking your recent notifications.",
                 listOf(PlannedToolCall("get_notifications", mapOf("limit" to "6"), "Fetch captured notifications"))
             )
-            IntentCategory.SCREEN_INSPECT -> ReasoningDecision(
-                "Inspect active screen",
-                "Inspecting the current screen.",
-                listOf(PlannedToolCall("get_accessible_screen", emptyMap(), "Read Accessibility node tree"))
-            )
+            IntentCategory.SCREEN_INSPECT -> {
+                if (lower.contains("aloud") || lower.contains("read screen") ||
+                    lower.contains("পড়ে") || lower.contains("পড়ে") || lower.contains("शোনাও") || lower.contains("पढ़ो")
+                ) {
+                    ReasoningDecision(
+                        "Read active screen aloud",
+                        "Reading the current screen.",
+                        listOf(PlannedToolCall("read_screen_aloud", emptyMap(), "Read active screen text aloud"))
+                    )
+                } else {
+                    ReasoningDecision(
+                        "Inspect active screen",
+                        "Inspecting the current screen.",
+                        listOf(PlannedToolCall("get_accessible_screen", emptyMap(), "Read Accessibility node tree"))
+                    )
+                }
+            }
+            IntentCategory.EMAIL_ACTION -> {
+                when {
+                    lower.contains("delete") || lower.contains("remove") || lower.contains("trash") ||
+                        lower.contains("মুছ") || lower.contains("ডিলিট") || lower.contains("हटा") -> {
+                        if (lower.contains("all") || lower.contains("bulk") || lower.contains("সব")) {
+                            ReasoningDecision(
+                                "Blocked ambiguous bulk email deletion",
+                                "For safety, bulk email deletion isn't automatic. Please open the specific email you want to delete and ask again so I can request your confirmation.",
+                                emptyList()
+                            )
+                        } else {
+                            ReasoningDecision(
+                                "Email deletion request (requires confirmation)",
+                                "Confirming before deleting the currently open email.",
+                                listOf(PlannedToolCall("manage_email", mapOf("action" to "delete_email"), "Delete active email with user confirmation"))
+                            )
+                        }
+                    }
+                    lower.contains("next") || lower.contains("পরের") || lower.contains("अगला") -> ReasoningDecision(
+                        "Open next email",
+                        "Moving to the next email.",
+                        listOf(PlannedToolCall("manage_email", mapOf("action" to "next_email"), "Navigate to next email"))
+                    )
+                    lower.contains("read") || lower.contains("check") || lower.contains("পড়") || lower.contains("পড়") || lower.contains("पढ़") -> {
+                        if (screenController.isCurrentlyInEmailApp()) {
+                            ReasoningDecision(
+                                "Read open email screen",
+                                "Reading your visible email.",
+                                listOf(PlannedToolCall("manage_email", mapOf("action" to "read_email"), "Read visible email content"))
+                            )
+                        } else {
+                            ReasoningDecision(
+                                "Open email app and read inbox",
+                                "Opening your email app so I can read it.",
+                                listOf(PlannedToolCall("manage_email", mapOf("action" to "open_email"), "Launch email app")),
+                                nextActionNeeded = true
+                            )
+                        }
+                    }
+                    else -> ReasoningDecision(
+                        "Open email app",
+                        "Opening your email app.",
+                        listOf(PlannedToolCall("manage_email", mapOf("action" to "open_email"), "Launch email app"))
+                    )
+                }
+            }
             IntentCategory.SCREEN_ACTION -> {
                 when {
                     lower.contains("home") || lower.contains("হোম") || lower.contains("होम") -> ReasoningDecision(
@@ -394,6 +452,16 @@ class ReasoningEngine(
                         "Going back.",
                         listOf(PlannedToolCall("press_back", emptyMap(), "Perform Accessibility GLOBAL_ACTION_BACK"))
                     )
+                    lower.contains("scroll left") || lower.contains("swipe left") || lower.contains("বামে") -> ReasoningDecision(
+                        "Scroll left",
+                        "Scrolling left.",
+                        listOf(PlannedToolCall("scroll_screen", mapOf("direction" to "left"), "Scroll horizontally left"))
+                    )
+                    lower.contains("scroll right") || lower.contains("swipe right") || lower.contains("ডানে") -> ReasoningDecision(
+                        "Scroll right",
+                        "Scrolling right.",
+                        listOf(PlannedToolCall("scroll_screen", mapOf("direction" to "right"), "Scroll horizontally right"))
+                    )
                     lower.contains("scroll up") || lower.contains("উপরে স্ক্রল") || lower.contains("স্ক্রল উপরে") || lower.contains("ऊपर") -> ReasoningDecision(
                         "Scroll up",
                         "Scrolling up.",
@@ -404,6 +472,21 @@ class ReasoningEngine(
                         "Scrolling down.",
                         listOf(PlannedToolCall("scroll_screen", mapOf("direction" to "down"), "Scroll forward"))
                     )
+                    lower.trim() in setOf("next", "next one", "পরেরটা", "अगला") -> {
+                        if (screenController.isCurrentlyInEmailApp()) {
+                            ReasoningDecision(
+                                "Context-aware Next -> Email",
+                                "Moving to the next email.",
+                                listOf(PlannedToolCall("manage_email", mapOf("action" to "next_email"), "Advance to next email"))
+                            )
+                        } else {
+                            ReasoningDecision(
+                                "Context-aware Next -> Screen scroll/next",
+                                "Moving to the next item.",
+                                listOf(PlannedToolCall("click_ui_element", mapOf("targetText" to "Next"), "Try Next button or scroll"))
+                            )
+                        }
+                    }
                     lower.startsWith("type ") || lower.startsWith("টাইপ ") -> {
                         val text = trimmed.substringAfter(" ").trim()
                         if (text.isBlank()) null else ReasoningDecision(

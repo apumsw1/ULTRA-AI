@@ -303,10 +303,13 @@ fun SettingsScreen(
                 }
 
                 Text("Assistant Language", style = MaterialTheme.typography.labelMedium, color = ArcCyan)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf("English", "বাংলা", "हिन्दी").forEach { lang ->
+                Row(
+                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    listOf("Auto", "English", "বাংলা", "हिन्दी").forEach { lang ->
                         FilterChip(
-                            selected = settings.language == lang,
+                            selected = settings.language.equals(lang, ignoreCase = true),
                             onClick = { onSelectLanguage(lang) },
                             label = { Text(lang) }
                         )

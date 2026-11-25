@@ -11,6 +11,54 @@ import android.speech.tts.Voice
 import com.ultra.assistant.data.VoiceGender
 import java.util.Locale
 
+class SentenceStreamExtractor {
+    private var emittedChars = 0
+
+    fun reset() {
+        emittedChars = 0
+    }
+
+    fun consumeDelta(accumulatedVisibleReply: String): List<String> {
+        if (accumulatedVisibleReply.length <= emittedChars) return emptyList()
+        val pending = accumulatedVisibleReply.substring(emittedChars)
+        val readySentences = mutableListOf<String>()
+        val boundaryRegex = Regex("[.!?।\\n]+(?:\\s+|$)")
+        var localCursor = 0
+
+        for (match in boundaryRegex.findAll(pending)) {
+            val end = match.range.last + 1
+            val piece = pending.substring(localCursor, end).trim()
+            if (piece.length >= 4) {
+                readySentences += piece
+                localCursor = end
+            }
+        }
+
+        // Also flush long unbroken clauses (>180 chars) at comma/semicolon for snappy voice latency
+        val remaining = pending.substring(localCursor)
+        if (remaining.length > 180) {
+            val clauseEnd = remaining.lastIndexOfAny(charArrayOf(',', ';', ':', '—'))
+            if (clauseEnd > 40) {
+                val piece = remaining.substring(0, clauseEnd + 1).trim()
+                if (piece.isNotBlank()) {
+                    readySentences += piece
+                    localCursor += clauseEnd + 1
+                }
+            }
+        }
+
+        emittedChars += localCursor
+        return readySentences
+    }
+
+    fun flushRemainder(accumulatedVisibleReply: String): String {
+        if (accumulatedVisibleReply.length <= emittedChars) return ""
+        val rem = accumulatedVisibleReply.substring(emittedChars).trim()
+        emittedChars = accumulatedVisibleReply.length
+        return rem
+    }
+}
+
 class VoiceAudioController(context: Context) {
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
     private var focusRequest: AudioFocusRequest? = null
@@ -60,7 +108,7 @@ class VoiceAudioController(context: Context) {
         explicitVoiceName: String? = null
     ) {
         val locale = LanguageManager.locale(languageSetting)
-        tts.language = locale
+        runCatching { tts.language = locale }
         tts.setSpeechRate(speed.coerceIn(0.75f, 1.35f))
 
         val selectedVoice = selectVoice(
@@ -74,10 +122,9 @@ class VoiceAudioController(context: Context) {
             runCatching { tts.voice = selectedVoice }
         }
 
-        // Apply subtle warm pitch differentiation even if the device lacks separate male/female voice packs
         val genderFactor = when (gender) {
-            VoiceGender.FEMALE -> 1.06f
-            VoiceGender.MALE -> 0.86f
+            VoiceGender.FEMALE -> 1.05f
+            VoiceGender.MALE -> 0.87f
         }
         val effectivePitch = (userPitch * genderFactor).coerceIn(0.68f, 1.45f)
         tts.setPitch(effectivePitch)
@@ -86,31 +133,62 @@ class VoiceAudioController(context: Context) {
     fun speakNaturally(
         tts: TextToSpeech,
         rawText: String,
-        volume: Float,
+        languageSetting: String = "English",
+        gender: VoiceGender = VoiceGender.FEMALE,
+        speed: Float = 1.0f,
+        userPitch: Float = 1.0f,
+        volume: Float = 0.95f,
+        preferOffline: Boolean = false,
+        explicitVoiceName: String? = null,
+        flushQueue: Boolean = true,
         utterancePrefix: String = "ultra_reply"
     ): String? {
         val clean = sanitizeForSpeech(rawText)
         if (clean.isBlank()) return null
 
-        val chunks = splitNaturalSentences(clean, maxChunkChars = 220)
-        if (chunks.isEmpty()) return null
+        val sentences = splitNaturalSentences(clean, maxChunkChars = 220)
+        if (sentences.isEmpty()) return null
 
         val clampedVolume = volume.coerceIn(0.1f, 1.0f)
         var lastUtteranceId: String? = null
+        var isFirst = flushQueue
+        val allVoices = runCatching { tts.voices.orEmpty() }.getOrDefault(emptySet())
+        var lastAppliedLocaleLang = ""
 
-        chunks.forEachIndexed { index, chunk ->
-            val queueMode = if (index == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
-            val uttId = "${utterancePrefix}_${System.currentTimeMillis()}_$index"
-            lastUtteranceId = uttId
-            val params = Bundle().apply {
-                putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, clampedVolume)
+        sentences.forEachIndexed { sIndex, sentence ->
+            val segments = LanguageManager.splitCodeSwitchedSegments(sentence, languageSetting)
+            segments.forEachIndexed { segIndex, (segLocale, segText) ->
+                if (segText.isBlank()) return@forEachIndexed
+                if (segLocale.language != lastAppliedLocaleLang) {
+                    val voice = selectVoice(
+                        voices = allVoices,
+                        locale = segLocale,
+                        gender = gender,
+                        preferOffline = preferOffline,
+                        explicitVoiceName = explicitVoiceName
+                    )
+                    if (voice != null) {
+                        runCatching { tts.voice = voice }
+                    } else {
+                        runCatching { tts.language = segLocale }
+                    }
+                    lastAppliedLocaleLang = segLocale.language
+                }
+
+                val queueMode = if (isFirst) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
+                isFirst = false
+                val uttId = "${utterancePrefix}_${System.currentTimeMillis()}_${sIndex}_$segIndex"
+                lastUtteranceId = uttId
+                val params = Bundle().apply {
+                    putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, clampedVolume)
+                }
+                val result = tts.speak(segText, queueMode, params, uttId)
+                if (result != TextToSpeech.SUCCESS) {
+                    return null
+                }
             }
-            val result = tts.speak(chunk, queueMode, params, uttId)
-            if (result != TextToSpeech.SUCCESS) {
-                return null
-            }
-            if (index < chunks.lastIndex) {
-                tts.playSilentUtterance(150L, TextToSpeech.QUEUE_ADD, "${uttId}_pause")
+            if (sIndex < sentences.lastIndex && lastUtteranceId != null) {
+                tts.playSilentUtterance(130L, TextToSpeech.QUEUE_ADD, "${lastUtteranceId}_pause")
             }
         }
         return lastUtteranceId
@@ -129,7 +207,7 @@ class VoiceAudioController(context: Context) {
     }
 
     private fun splitNaturalSentences(text: String, maxChunkChars: Int): List<String> {
-        val bounded = text.take(1500)
+        val bounded = text.take(1600)
         val rawSentences = bounded
             .split(Regex("(?<=[.!?।\\n])\\s+"))
             .map { it.trim() }
@@ -180,7 +258,9 @@ class VoiceAudioController(context: Context) {
 
         if (!explicitVoiceName.isNullOrBlank()) {
             voices.firstOrNull {
-                it.name == explicitVoiceName && (!preferOffline || !it.isNetworkConnectionRequired)
+                it.name == explicitVoiceName &&
+                    it.locale.language.equals(locale.language, ignoreCase = true) &&
+                    (!preferOffline || !it.isNetworkConnectionRequired)
             }?.let { return it }
         }
 
@@ -196,6 +276,7 @@ class VoiceAudioController(context: Context) {
 
         val femaleHints = listOf("female", "woman", "sfg", "tpf", "iog", "tpc", "x-bn-a", "x-bn-b", "x-hia", "x-hid", "neural2-c", "neural2-f")
         val maleHints = listOf("male", "man", "iom", "iol", "tpd", "x-bn-d", "x-hib", "x-hic", "neural2-d", "neural2-a", "neural2-j")
+        val neuralHints = listOf("neural", "wavenet", "journey", "studio", "network", "hd")
         val targetHints = if (gender == VoiceGender.FEMALE) femaleHints else maleHints
 
         return matchingLang
@@ -203,11 +284,16 @@ class VoiceAudioController(context: Context) {
                 var score = 0
                 val lowerName = voice.name.lowercase()
                 val featuresStr = voice.features?.joinToString(" ")?.lowercase().orEmpty()
-                if (voice.locale.country.equals(locale.country, ignoreCase = true)) score += 3
-                if (voice.quality >= Voice.QUALITY_HIGH) score += 4
+                if (voice.locale.country.equals(locale.country, ignoreCase = true)) score += 4
+                if (voice.quality >= Voice.QUALITY_VERY_HIGH) score += 7
+                else if (voice.quality >= Voice.QUALITY_HIGH) score += 5
                 else if (voice.quality >= Voice.QUALITY_NORMAL) score += 2
-                if (!preferOffline && voice.isNetworkConnectionRequired) score += 1
-                if (preferOffline && !voice.isNetworkConnectionRequired) score += 5
+                if (!preferOffline) {
+                    if (voice.isNetworkConnectionRequired) score += 4
+                    if (neuralHints.any { lowerName.contains(it) || featuresStr.contains(it) }) score += 6
+                } else {
+                    if (!voice.isNetworkConnectionRequired) score += 8
+                }
                 if (targetHints.any { lowerName.contains(it) || featuresStr.contains(it) }) score += 10
                 score
             }

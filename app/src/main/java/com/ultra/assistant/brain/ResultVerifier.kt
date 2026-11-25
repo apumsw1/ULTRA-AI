@@ -30,10 +30,18 @@ class ResultVerifier {
             "${res.summary}$extra"
         }
 
+        val verbatimSummaryTools = setOf(
+            "get_notifications",
+            "get_accessible_screen",
+            "get_device_information",
+            "read_screen_aloud",
+            "manage_email"
+        )
+
         val reply = when {
             confirmationNeeded -> results.first { it.requiresConfirmation }.summary
             missingPerm != null -> "${results.first { it.missingPermission != null }.summary} Open Settings to grant ${missingPerm.displayName}."
-            allOk && decisionReply.isNotBlank() && results.none { it.toolId in setOf("get_notifications", "get_accessible_screen", "get_device_information") } ->
+            allOk && decisionReply.isNotBlank() && results.none { it.toolId in verbatimSummaryTools } ->
                 if (results.size == 1 && results.first().summary.equals(decisionReply, ignoreCase = true)) {
                     decisionReply
                 } else {

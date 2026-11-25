@@ -1,6 +1,7 @@
 package com.ultra.assistant.tools
 
 import android.content.Context
+import android.content.Intent
 import com.ultra.assistant.automation.RuleManager
 import com.ultra.assistant.automation.TaskScheduler
 import com.ultra.assistant.control.AppController
@@ -43,10 +44,12 @@ class ToolRegistry(
         MakePhoneCallTool(),
         NavigateSystemTool(),
         GetAccessibleScreenTool(),
+        ReadScreenAloudTool(),
         ClickUiElementTool(),
         TypeTextTool(),
         ScrollScreenTool(),
         PressBackTool(),
+        ManageEmailTool(),
         GetNotificationsTool(),
         PrepareSmsTool(),
         OpenBrowserTool(),
@@ -270,7 +273,7 @@ class ToolRegistry(
     private inner class GetAccessibleScreenTool : UltraTool {
         override val id = "get_accessible_screen"
         override val title = "Inspect Active Screen"
-        override val description = "Read visible UI controls and active window structure via Android Accessibility."
+        override val description = "Read visible UI controls, search bars, and active window structure via Android Accessibility."
         override val parameters = emptyList<ToolParamSpec>()
         override val requiredPermissions = listOf(PermissionRequirement.ACCESSIBILITY)
         override val riskLevel = RiskLevel.MEDIUM
@@ -288,6 +291,28 @@ class ToolRegistry(
                 onSuccess = { desc -> ToolExecutionResult(id, true, "Captured accessible screen.", desc) },
                 onFailure = { err -> ToolExecutionResult(id, false, err.message ?: "Failed to inspect screen.") }
             )
+        }
+    }
+
+    private inner class ReadScreenAloudTool : UltraTool {
+        override val id = "read_screen_aloud"
+        override val title = "Read Screen Aloud"
+        override val description = "Summarize visible screen text or open email content in human-readable form for speaking aloud."
+        override val parameters = emptyList<ToolParamSpec>()
+        override val requiredPermissions = listOf(PermissionRequirement.ACCESSIBILITY)
+        override val riskLevel = RiskLevel.LOW
+
+        override suspend fun execute(args: Map<String, String>): ToolExecutionResult {
+            if (!PermissionManager.isAccessibilityEnabled(appContext)) {
+                return ToolExecutionResult(
+                    id,
+                    false,
+                    "Accessibility Service is required to read the active screen aloud.",
+                    missingPermission = PermissionRequirement.ACCESSIBILITY
+                )
+            }
+            val res = screenController.readScreenAloud()
+            return ToolExecutionResult(id, res.success, res.message, res.affectedElement.orEmpty())
         }
     }
 
@@ -353,12 +378,20 @@ class ToolRegistry(
     private inner class ScrollScreenTool : UltraTool {
         override val id = "scroll_screen"
         override val title = "Scroll Screen"
-        override val description = "Scroll the active screen up/backward or down/forward."
+        override val description = "Scroll the active screen down, up, left, or right."
         override val parameters = listOf(
-            ToolParamSpec("direction", "string", "'down' or 'up'", required = false)
+            ToolParamSpec("direction", "string", "'down', 'up', 'left', or 'right'", required = false)
         )
         override val requiredPermissions = listOf(PermissionRequirement.ACCESSIBILITY)
         override val riskLevel = RiskLevel.LOW
+
+        override fun validateArgs(args: Map<String, String>): String? {
+            val dir = args["direction"]?.trim()?.lowercase().orEmpty()
+            if (dir.isNotEmpty() && dir !in setOf("down", "up", "left", "right")) {
+                return "Invalid scroll direction '$dir'. Expected down, up, left, or right."
+            }
+            return null
+        }
 
         override suspend fun execute(args: Map<String, String>): ToolExecutionResult {
             if (!PermissionManager.isAccessibilityEnabled(appContext)) {
@@ -394,6 +427,92 @@ class ToolRegistry(
             }
             val res = screenController.pressBack()
             return ToolExecutionResult(id, res.success, res.message)
+        }
+    }
+
+    private inner class ManageEmailTool : UltraTool {
+        override val id = "manage_email"
+        override val title = "Email Assistant"
+        override val description = "Open email app ('open_email'), read visible inbox/email aloud ('read_email'), move to next email ('next_email'), go back ('go_back'), or delete currently open email ('delete_email' — always requires explicit user confirmation; bulk deletion is blocked unless explicitly confirmed)."
+        override val parameters = listOf(
+            ToolParamSpec("action", "string", "'open_email', 'read_email', 'next_email', 'go_back', or 'delete_email'", required = true),
+            ToolParamSpec("targetEmail", "string", "Optional subject or sender to tap/open before acting", required = false)
+        )
+        override val requiredPermissions = emptyList<PermissionRequirement>()
+        override val riskLevel = RiskLevel.MEDIUM
+
+        override fun validateArgs(args: Map<String, String>): String? {
+            val action = args["action"]?.trim()?.lowercase().orEmpty()
+            if (action.isBlank()) return "Provide an email 'action' (open_email, read_email, next_email, go_back, delete_email)."
+            if (action.contains("bulk") || action.contains("all")) {
+                return "Safety guard: Bulk email deletion cannot run automatically. Open and confirm specific emails individually."
+            }
+            return null
+        }
+
+        override suspend fun execute(args: Map<String, String>): ToolExecutionResult {
+            val action = args["action"]?.trim()?.lowercase().orEmpty()
+            val targetEmail = args["targetEmail"].orEmpty().trim()
+            if (action == "open_email") {
+                val gmail = appController.launchApp("Gmail")
+                if (gmail.isSuccess) {
+                    return ToolExecutionResult(id, true, "Opened Gmail.", gmail.getOrNull()?.packageName.orEmpty())
+                }
+                val fallback = runCatching {
+                    val intent = Intent(Intent.ACTION_MAIN)
+                        .addCategory(Intent.CATEGORY_APP_EMAIL)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    appContext.startActivity(intent)
+                }
+                return if (fallback.isSuccess) {
+                    ToolExecutionResult(id, true, "Opened your default email app.")
+                } else {
+                    ToolExecutionResult(id, false, "No email app found on this device.")
+                }
+            }
+
+            if (!PermissionManager.isAccessibilityEnabled(appContext)) {
+                return ToolExecutionResult(
+                    id,
+                    false,
+                    "Accessibility Service is required to read or control inside your email app.",
+                    missingPermission = PermissionRequirement.ACCESSIBILITY
+                )
+            }
+
+            if (targetEmail.isNotBlank()) {
+                val openRes = screenController.clickElement(targetEmail)
+                if (!openRes.success) {
+                    return ToolExecutionResult(id, false, "Could not find email matching '$targetEmail' on screen.")
+                }
+            }
+
+            return when (action) {
+                "read_email" -> {
+                    val res = screenController.readScreenAloud()
+                    ToolExecutionResult(id, res.success, res.message)
+                }
+                "next_email" -> {
+                    val res = screenController.clickNextInApp()
+                    ToolExecutionResult(id, res.success, res.message)
+                }
+                "go_back" -> {
+                    val res = screenController.pressBack()
+                    ToolExecutionResult(id, res.success, res.message)
+                }
+                "delete_email" -> {
+                    val deleteClick = listOf("Delete", "Trash", "Move to Trash", "মুছুন", "ডিলিট", "हटाएं")
+                        .firstNotNullOfOrNull { label ->
+                            screenController.clickElement(label).takeIf { it.success }
+                        }
+                    if (deleteClick != null) {
+                        ToolExecutionResult(id, true, "Deleted the selected email as confirmed.", deleteClick.affectedElement.orEmpty())
+                    } else {
+                        ToolExecutionResult(id, false, "Could not locate a Delete button on the active email screen.")
+                    }
+                }
+                else -> ToolExecutionResult(id, false, "Unsupported email action '$action'.")
+            }
         }
     }
 

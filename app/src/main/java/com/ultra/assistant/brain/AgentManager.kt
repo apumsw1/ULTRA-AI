@@ -49,6 +49,9 @@ class AgentManager(
     private val _liveStatus = MutableStateFlow("")
     val liveStatusFlow: StateFlow<String> = _liveStatus.asStateFlow()
 
+    private val _voicePhase = MutableStateFlow("IDLE")
+    val voicePhaseFlow: StateFlow<String> = _voicePhase.asStateFlow()
+
     @Volatile
     private var stopRequested: Boolean = false
 
@@ -57,6 +60,7 @@ class AgentManager(
         _isStreaming.value = false
         _streamingReply.value = ""
         _pendingConfirmation.value = null
+        _voicePhase.value = "IDLE"
         _liveStatus.value = "Stopped"
     }
 
@@ -198,7 +202,8 @@ class AgentManager(
             }
 
             // Keep temporary conversation context across Online <-> Offline fallback seamlessly
-            _liveStatus.value = "✦ Reasoning & Planning..."
+            _voicePhase.value = "THINKING"
+            _liveStatus.value = "✦ Thinking & Planning..."
             val toolCatalogJson = toolRegistry.schemaSummaryForPrompt()
             val (providerUsed, initialDecision) = reasoningEngine.decide(
                 userInput = input,
@@ -219,11 +224,14 @@ class AgentManager(
             var awaitingConfirmation = false
             var nextNeeded = initialDecision.nextActionNeeded ||
                 (IntentEngine.isCompoundAction(input) && initialDecision.plannedTools.any {
-                    it.toolId == "open_app" || it.toolId == "open_device_settings"
+                    it.toolId == "open_app" || it.toolId == "open_device_settings" || it.toolId == "manage_email"
                 })
 
             // Cycle 0: Execute initial plan
             val initialPlan = taskPlanner.buildPlan(initialDecision)
+            if (initialPlan.isNotEmpty()) {
+                _voicePhase.value = "EXECUTING_ACTION"
+            }
             for (call in initialPlan) {
                 if (stopRequested) break
                 _liveStatus.value = "⚡ ${call.toolId.replace('_', ' ')}..."
@@ -326,6 +334,7 @@ class AgentManager(
                 latestReply = "Stopped as requested."
             }
 
+            _voicePhase.value = "VERIFYING"
             val verification = resultVerifier.verify(latestReply, results)
             val missingPerm = extraMissingPerm ?: verification.missingPermission
             val finalReply = if (extraMissingPerm != null && !verification.userReply.contains("Accessibility", ignoreCase = true)) {
@@ -365,6 +374,7 @@ class AgentManager(
             _latestReport.value = report
             return report
         } finally {
+            _voicePhase.value = "IDLE"
             _liveStatus.value = ""
         }
     }
@@ -448,8 +458,10 @@ class AgentManager(
         return listOf(
             "open ", "launch ", "youtube", "volume", "mute", "flashlight", "torch",
             "bluetooth", "wifi", "wi-fi", "settings", "call ", "dial ", "sms", "message",
-            "remind", "notification", "screen", "click", "tap", "scroll", "type ", "lock",
-            "search", "battery", "quick settings", "খোলো", "খুলে", "সার্চ", "কল", "खोलो", "सर्च", "कॉल"
+            "remind", "notification", "screen", "click", "tap", "scroll", "swipe", "type ", "lock",
+            "search", "battery", "quick settings", "email", "gmail", "read aloud", "next",
+            "খোলো", "খুলে", "সার্চ", "কল", "ইমেইল", "স্ক্রল", "পড়", "পড়",
+            "खोलो", "सर्च", "कॉल", "ईमेल", "स्क्रॉल", "पढ़"
         ).any { lower.contains(it) }
     }
 

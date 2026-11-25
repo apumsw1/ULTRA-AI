@@ -11,6 +11,13 @@ class IntentEngine {
             isCompoundAction(cleaned) -> IntentCategory.SCREEN_ACTION
             containsAny(
                 norm,
+                "open email", "open gmail", "check email", "read email", "read my email",
+                "next email", "previous email", "delete email", "delete this email", "delete mail",
+                "ইমেইল খোলো", "জিমেইল খোলো", "ইমেইল পড়ো", "ইমেইল পড়ো", "পরের ইমেইল", "ইমেইল ডিলিট", "ইমেইল মুছো",
+                "ईमेल खोलो", "जीमेल खोलो", "ईमेल पढ़ो", "अगला ईमेल", "ईमेल हटाओ"
+            ) -> IntentCategory.EMAIL_ACTION
+            containsAny(
+                norm,
                 "lock phone", "lock screen", "ফোন লক", "ডিভাইস তথ্য", "device info",
                 "wifi", "wi-fi", "bluetooth", "ওয়াইফাই", "ব্লুটুথ", "brightness",
                 "display settings", "network settings", "sound settings",
@@ -32,12 +39,15 @@ class IntentEngine {
                 IntentCategory.SMS_PREPARE
             containsAny(norm, "remind", "reminder", "রিমাইন্ডার", "মনে করিয়ে", "रिमाइंडर") ->
                 IntentCategory.REMINDER
-            containsAny(norm, "read screen", "what's on screen", "inspect screen", "স্ক্রিন দেখ", "স্ক্রিন পড়", "स्क्रीन देखो") ->
-                IntentCategory.SCREEN_INSPECT
             containsAny(
                 norm,
-                "click ", "tap ", "type ", "scroll", "go back", "press back", "go home",
-                "home screen", "recent apps", "ক্লিক", "টাইপ", "ব্যাক", "স্ক্রল", "হোম", "स्क्रॉल", "होम", "बैक"
+                "read screen", "read aloud", "what's on screen", "inspect screen",
+                "স্ক্রিন দেখ", "স্ক্রিন পড়", "স্ক্রিন পড়", "স্ক্রিন পড়ে শোনাও", "स्क्रीन देखो", "स्क्रीन पढ़ो"
+            ) -> IntentCategory.SCREEN_INSPECT
+            containsAny(
+                norm,
+                "click ", "tap ", "type ", "scroll", "swipe ", "go back", "press back", "go home",
+                "home screen", "recent apps", "next", "ক্লিক", "টাইপ", "ব্যাক", "স্ক্রল", "হোম", "পরের", "स्क्रॉल", "होम", "बैक", "अगला"
             ) -> IntentCategory.SCREEN_ACTION
             containsAny(norm, "remember that", "মনে রাখ", "याद रखना", "याद रखो") ->
                 IntentCategory.MEMORY_SAVE
@@ -67,6 +77,9 @@ class IntentEngine {
                 listOf("kholo", "koro", "kore", "korbo", "bhalo", "amar", "tumi", "kemone", "kemon", "thamo", "naam").any {
                     Regex("\\b$it\\b").containsMatchIn(lower)
                 } -> "bn"
+                listOf("kya", "kaise", "karo", "chalu", "band", "mera").any {
+                    Regex("\\b$it\\b").containsMatchIn(lower)
+                } -> "hi"
                 else -> "en"
             }
         }
@@ -118,7 +131,9 @@ class IntentEngine {
                 Regex("\\bflash\\s+light\\b", RegexOption.IGNORE_CASE) to "flashlight",
                 Regex("\\bwhats\\s+app\\b", RegexOption.IGNORE_CASE) to "WhatsApp",
                 Regex("\\bface\\s+book\\b", RegexOption.IGNORE_CASE) to "Facebook",
-                Regex("\\binsta\\s+gram\\b", RegexOption.IGNORE_CASE) to "Instagram"
+                Regex("\\binsta\\s+gram\\b", RegexOption.IGNORE_CASE) to "Instagram",
+                Regex("\\bg\\s+mail\\b", RegexOption.IGNORE_CASE) to "Gmail",
+                Regex("\\be\\s*-?\\s*mail\\b", RegexOption.IGNORE_CASE) to "email"
             )
             replacements.forEach { (pattern, replacement) ->
                 s = s.replace(pattern, replacement)
@@ -133,9 +148,9 @@ class IntentEngine {
             ).any { lower.contains(it) }
             val hasSecondaryVerb = listOf(
                 " and ", " then ", " after that ", " search ", " type ", " click ", " tap ",
-                " play ", " scroll ", " send ", " message ", " message to ",
-                " করে ", " সার্চ", " টাইপ", " ক্লিক", " লিখে", " এবং ", " তারপর ", " স্ক্রল",
-                " और ", " फिर ", " सर्च", " टाइप", " स्क्रॉल"
+                " play ", " scroll ", " send ", " message ", " message to ", " read ", " delete ",
+                " করে ", " সার্চ", " টাইপ", " ক্লিক", " লিখে", " এবং ", " তারপর ", " স্ক্রল", " পড়", " পড়",
+                " और ", " फिर ", " सर्च", " टाइप", " स्क्रॉल", " पढ़"
             ).any { lower.contains(it) }
             val hasTwoScreenActions = listOf("click ", "tap ", "type ", "scroll ").count { lower.contains(it) } >= 2
             return (hasOpenOrLaunch && hasSecondaryVerb) || hasTwoScreenActions

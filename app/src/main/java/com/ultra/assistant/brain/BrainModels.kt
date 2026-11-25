@@ -23,6 +23,7 @@ enum class IntentCategory {
     PHONE_CALL,
     REMINDER,
     DEVICE_CONTROL,
+    EMAIL_ACTION,
     MEMORY_SAVE,
     CONVERSATION
 }

@@ -5,6 +5,8 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -20,6 +22,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.BubbleChart
 import androidx.compose.material.icons.filled.CallEnd
+import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.PanTool
 import androidx.compose.material.icons.filled.RecordVoiceOver
@@ -28,6 +31,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -60,12 +64,16 @@ import com.ultra.assistant.ui.theme.AmberWarning
 import com.ultra.assistant.ui.theme.ArcCyan
 import com.ultra.assistant.ui.theme.CrimsonAlert
 import com.ultra.assistant.ui.theme.EmeraldVerified
+import com.ultra.assistant.ui.theme.NeuralViolet
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun VoiceScreen(
     isServiceRunning: Boolean,
+    isSessionListening: Boolean,
     voiceState: String,
     voiceLevel: Float,
+    audioHardwareSummary: String,
     partialTranscript: String,
     lastRecognizedText: String,
     lastAgentReply: String,
@@ -93,6 +101,20 @@ fun VoiceScreen(
 
     val effectiveOffline = settings.operatingMode == AiOperatingMode.OFFLINE || !isOnline
     val speaking = voiceState.equals("SPEAKING", true)
+    val activeVoice = isSessionListening || speaking ||
+        voiceState in setOf(
+            "CONNECTING", "LISTENING", "USER_SPEAKING", "PROCESSING",
+            "THINKING", "EXECUTING_ACTION", "VERIFYING", "INTERRUPTED", "RECONNECTING"
+        )
+
+    val stateColor = when (voiceState.uppercase()) {
+        "USER_SPEAKING", "LISTENING", "CONNECTING" -> ArcCyan
+        "THINKING", "PROCESSING" -> NeuralViolet
+        "SPEAKING", "EXECUTING_ACTION", "VERIFYING" -> EmeraldVerified
+        "INTERRUPTED", "RECONNECTING", "OFFLINE" -> AmberWarning
+        "ERROR" -> CrimsonAlert
+        else -> if (activeVoice) EmeraldVerified else ArcCyan
+    }
 
     LazyColumn(
         modifier = Modifier
@@ -121,18 +143,18 @@ fun VoiceScreen(
                                 .clip(CircleShape)
                         )
                         StatusPill(
-                            label = if (isServiceRunning) "LIVE CALL: $voiceState" else "VOICE READY",
-                            color = if (isServiceRunning) EmeraldVerified else ArcCyan
+                            label = if (activeVoice) "VOICE: $voiceState" else "VOICE READY ($voiceState)",
+                            color = stateColor
                         )
                     }
                     StatusPill(
                         label = when {
-                            isReconnecting -> "RECONNECTING"
+                            isReconnecting || voiceState == "RECONNECTING" -> "RECONNECTING"
                             effectiveOffline -> "OFFLINE VOICE"
                             else -> "ONLINE VOICE"
                         },
                         color = when {
-                            isReconnecting -> ArcCyan
+                            isReconnecting || voiceState == "RECONNECTING" -> AmberWarning
                             effectiveOffline -> AmberWarning
                             else -> EmeraldVerified
                         }
@@ -147,23 +169,59 @@ fun VoiceScreen(
                     VoiceOrbCanvas(
                         voiceState = voiceState,
                         voiceLevel = voiceLevel,
-                        isServiceActive = isServiceRunning || speaking,
+                        isServiceActive = activeVoice,
                         modifier = Modifier
                             .size(205.dp)
                             .clickable {
                                 if (speaking) onInterruptVoice()
-                                else if (isServiceRunning) onStopVoice()
+                                else if (activeVoice) onStopVoice()
                                 else onStartVoice()
                             }
                     )
 
+                    // Real-time audio level meter
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.GraphicEq,
+                            contentDescription = "Microphone input level",
+                            tint = if (activeVoice) stateColor else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        LinearProgressIndicator(
+                            progress = { (voiceLevel / 12f).coerceIn(0f, 1f) },
+                            color = stateColor,
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(6.dp)
+                                .clip(CircleShape)
+                        )
+                        Text(
+                            text = if (audioHardwareSummary.isNotBlank()) audioHardwareSummary else "Mic Idle",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+
                     Text(
-                        text = when {
-                            speaking -> "Speaking (${settings.voiceGender.label}) — tap orb to interrupt"
-                            voiceState == "LISTENING" -> "Listening naturally — speak anytime"
-                            voiceState == "PROCESSING" -> "Thinking about your request..."
-                            isServiceRunning -> "Connected • Natural turn-taking active"
-                            else -> "Start a live phone-style AI conversation"
+                        text = when (voiceState.uppercase()) {
+                            "CONNECTING" -> "Starting continuous voice pipeline..."
+                            "USER_SPEAKING" -> "Hearing your voice..."
+                            "LISTENING" -> "Always-ready listening — speak anytime"
+                            "PROCESSING" -> "Understanding your voice..."
+                            "THINKING" -> "Reasoning through your request..."
+                            "EXECUTING_ACTION" -> "Executing device action..."
+                            "VERIFYING" -> "Verifying screen & action result..."
+                            "SPEAKING" -> "Speaking (${settings.voiceGender.label}) — speak or tap to interrupt"
+                            "INTERRUPTED" -> "Interrupted — listening to you now"
+                            "RECONNECTING" -> "Connection dropped — falling back smoothly..."
+                            "OFFLINE" -> "Offline voice ready — local commands active"
+                            "ERROR" -> "Microphone or audio warning — check permissions"
+                            "STOPPED" -> "Session paused cleanly — tap Start to resume"
+                            else -> if (isServiceRunning) "Floating assistant standing by" else "Tap Start once for continuous hands-free conversation"
                         },
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -210,9 +268,9 @@ fun VoiceScreen(
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Button(
-                        onClick = if (isServiceRunning) onStopVoice else onStartVoice,
+                        onClick = if (activeVoice) onStopVoice else onStartVoice,
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = if (isServiceRunning) CrimsonAlert else MaterialTheme.colorScheme.primary
+                            containerColor = if (activeVoice) CrimsonAlert else MaterialTheme.colorScheme.primary
                         ),
                         modifier = Modifier
                             .weight(1f)
@@ -220,11 +278,11 @@ fun VoiceScreen(
                             .testTag("voice_start_stop_button")
                     ) {
                         Icon(
-                            imageVector = if (isServiceRunning) Icons.Default.CallEnd else Icons.Default.Mic,
-                            contentDescription = "Toggle voice conversation"
+                            imageVector = if (activeVoice) Icons.Default.CallEnd else Icons.Default.Mic,
+                            contentDescription = "Start or stop continuous voice session"
                         )
                         Text(
-                            if (isServiceRunning) " End Voice Call" else " Start Voice Call",
+                            if (activeVoice) " Stop Session" else " Start Voice",
                             fontWeight = FontWeight.SemiBold
                         )
                     }
@@ -254,8 +312,8 @@ fun VoiceScreen(
                                 .height(50.dp)
                                 .testTag("voice_floating_bubble_button")
                         ) {
-                            Icon(Icons.Default.BubbleChart, contentDescription = "Floating bubble")
-                            Text(" Bubble")
+                            Icon(Icons.Default.BubbleChart, contentDescription = "Floating radial bubble")
+                            Text(" Radial Dot")
                         }
                     }
                 }
@@ -269,7 +327,7 @@ fun VoiceScreen(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("Human Voice & Language", style = MaterialTheme.typography.titleMedium)
+                    Text("Human Voice & Multilingual AI", style = MaterialTheme.typography.titleMedium)
                     OutlinedButton(
                         onClick = onTestVoice,
                         modifier = Modifier
@@ -281,7 +339,16 @@ fun VoiceScreen(
                     }
                 }
 
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "Online mode captures silent VAD audio (no recognizer chimes) with Gemini multimodal BN/HI/EN code-switching and sentence-streaming Neural TTS. External paid Realtime Voice APIs are not active without a configured key.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
                     VoiceGender.entries.forEach { gender ->
                         FilterChip(
                             selected = settings.voiceGender == gender,
@@ -291,10 +358,13 @@ fun VoiceScreen(
                     }
                 }
 
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf("English", "বাংলা", "हिन्दी").forEach { lang ->
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    listOf("Auto", "English", "বাংলা", "हिन्दी").forEach { lang ->
                         FilterChip(
-                            selected = settings.language == lang,
+                            selected = settings.language.equals(lang, ignoreCase = true),
                             onClick = { onSelectLanguage(lang) },
                             label = { Text(lang) }
                         )
@@ -309,7 +379,7 @@ fun VoiceScreen(
                     Column(modifier = Modifier.weight(1f)) {
                         Text("Continuous Conversation", style = MaterialTheme.typography.bodyLarge)
                         Text(
-                            "Automatically listen after AI finishes speaking with natural turn-taking.",
+                            "Stay ready after each reply with automatic acoustic barge-in.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )

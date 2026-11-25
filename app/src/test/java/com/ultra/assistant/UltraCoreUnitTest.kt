@@ -8,6 +8,8 @@ import com.ultra.assistant.memory.PrivacyGuard
 import com.ultra.assistant.tools.PermissionRequirement
 import com.ultra.assistant.tools.ToolExecutionResult
 import com.ultra.assistant.voice.LanguageManager
+import com.ultra.assistant.voice.SentenceStreamExtractor
+import com.ultra.assistant.voice.VoiceAudioMath
 import com.ultra.assistant.voice.WakeWordEngine
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -74,13 +76,26 @@ class UltraCoreUnitTest {
     }
 
     @Test
-    fun `language manager maps Bengali Hindi and English locales`() {
+    fun `language manager maps Bengali Hindi English Auto and code-switching`() {
         assertEquals(Locale.forLanguageTag("bn-BD"), LanguageManager.locale("বাংলা"))
         assertEquals("bn-IN", LanguageManager.speechRecognizerTag("bn"))
         assertEquals(Locale.forLanguageTag("hi-IN"), LanguageManager.locale("हिन्दी"))
         assertEquals("hi-IN", LanguageManager.speechRecognizerTag("hi"))
         assertEquals(Locale.US, LanguageManager.locale("English"))
         assertEquals("en-US", LanguageManager.speechRecognizerTag("English"))
+
+        assertTrue(LanguageManager.isAutoLanguage("Auto"))
+        assertTrue(LanguageManager.isAutoLanguage("Auto (BN/HI/EN)"))
+        assertFalse(LanguageManager.isAutoLanguage("English"))
+        assertEquals("বাংলা", LanguageManager.detectScriptLanguageTag("আমার নাম রফি", "Auto"))
+        assertEquals("हिन्दी", LanguageManager.detectScriptLanguageTag("मेरा नाम अमन", "Auto"))
+
+        val segments = LanguageManager.splitCodeSwitchedSegments(
+            "আমি এখন Settings open করছি।",
+            defaultSetting = "Auto"
+        )
+        assertTrue(segments.any { it.first.language == "bn" })
+        assertTrue(segments.any { it.first.language == "en" })
     }
 
     @Test
@@ -132,5 +147,110 @@ class UltraCoreUnitTest {
         assertEquals("তানভীর", IntentEngine.extractUserNameDeclaration("আমার নাম তানভীর"))
         assertEquals("अमन", IntentEngine.extractUserNameDeclaration("मेरा नाम अमन है"))
         assertEquals(null, IntentEngine.extractUserNameDeclaration("My name is something very long that is definitely a sentence"))
+    }
+
+    @Test
+    fun `voice audio math computes RMS dBFS clipping thresholds and wav header`() {
+        val silence = ShortArray(320) { 0 }
+        assertEquals(0f, VoiceAudioMath.computeRms(silence), 0.01f)
+        assertEquals(-60f, VoiceAudioMath.computeDbfs(0f), 0.01f)
+        assertFalse(VoiceAudioMath.detectClipping(silence))
+
+        val tone = ShortArray(320) { 1000 }
+        assertEquals(1000f, VoiceAudioMath.computeRms(tone), 0.1f)
+        val visual = VoiceAudioMath.rmsToVisualLevel(1000f)
+        assertTrue(visual in 0f..12f)
+
+        val clipped = ShortArray(10) { i -> if (i < 4) 32500 else 100 }
+        assertTrue(VoiceAudioMath.detectClipping(clipped))
+
+        val idleGate = VoiceAudioMath.computeAdaptiveThreshold(150f, assistantSpeaking = false, echoCancelerActive = false)
+        val aecBargeGate = VoiceAudioMath.computeAdaptiveThreshold(150f, assistantSpeaking = true, echoCancelerActive = true)
+        val noAecBargeGate = VoiceAudioMath.computeAdaptiveThreshold(150f, assistantSpeaking = true, echoCancelerActive = false)
+        assertTrue(idleGate < aecBargeGate)
+        assertTrue(aecBargeGate < noAecBargeGate)
+
+        val wav = VoiceAudioMath.pcm16ToWavBytes(ByteArray(640))
+        assertEquals(44 + 640, wav.size)
+        assertEquals('R'.code.toByte(), wav[0])
+        assertEquals('I'.code.toByte(), wav[1])
+        assertEquals('F'.code.toByte(), wav[2])
+        assertEquals('F'.code.toByte(), wav[3])
+        assertEquals('W'.code.toByte(), wav[8])
+        assertEquals('A'.code.toByte(), wav[9])
+        assertEquals('V'.code.toByte(), wav[10])
+        assertEquals('E'.code.toByte(), wav[11])
+    }
+
+    @Test
+    fun `sentence stream extractor emits completed sentences and flushes remainder`() {
+        val extractor = SentenceStreamExtractor()
+        val first = extractor.consumeDelta("Hello! How can I")
+        assertEquals(listOf("Hello!"), first)
+
+        val second = extractor.consumeDelta("Hello! How can I help you today? Let's")
+        assertEquals(listOf("How can I help you today?"), second)
+
+        val rem = extractor.flushRemainder("Hello! How can I help you today? Let's check.")
+        assertEquals("Let's check.", rem)
+        assertEquals("", extractor.flushRemainder("Hello! How can I help you today? Let's check."))
+    }
+
+    @Test
+    fun `radial menu layout math snaps anchors to screen edges and opens semicircle inward`() {
+        val leftAnchor = RadialMenuLayoutMath.computeAnchor(
+            dotCenterX = 120f,
+            dotCenterY = 50f,
+            screenWidth = 1080f,
+            screenHeight = 2400f,
+            menuRadiusPx = 200f,
+            edgeMarginPx = 30f,
+            topSafePx = 60f,
+            bottomSafePx = 80f
+        )
+        assertTrue(leftAnchor.isLeftEdge)
+        assertTrue(leftAnchor.openRightward)
+        assertEquals(30f, leftAnchor.centerX, 0.1f)
+        assertEquals(260f, leftAnchor.centerY, 0.1f)
+
+        val leftPositions = RadialMenuLayoutMath.computeItemPositions(
+            items = RadialMenuLayoutMath.defaultItems,
+            anchor = leftAnchor,
+            orbitRadiusX = 180f,
+            orbitRadiusY = 220f,
+            rotationOffsetDeg = 0f
+        )
+        assertTrue(leftPositions.isNotEmpty())
+        assertTrue(leftPositions.all { it.x >= leftAnchor.centerX - 25f })
+
+        val rightAnchor = RadialMenuLayoutMath.computeAnchor(
+            dotCenterX = 950f,
+            dotCenterY = 1200f,
+            screenWidth = 1080f,
+            screenHeight = 2400f,
+            menuRadiusPx = 200f,
+            edgeMarginPx = 30f,
+            topSafePx = 60f,
+            bottomSafePx = 80f
+        )
+        assertFalse(rightAnchor.isLeftEdge)
+        assertFalse(rightAnchor.openRightward)
+        val rightPositions = RadialMenuLayoutMath.computeItemPositions(
+            items = RadialMenuLayoutMath.defaultItems,
+            anchor = rightAnchor,
+            orbitRadiusX = 180f,
+            orbitRadiusY = 220f,
+            rotationOffsetDeg = 0f
+        )
+        assertTrue(rightPositions.all { it.x <= rightAnchor.centerX + 25f })
+    }
+
+    @Test
+    fun `intent engine recognizes email actions horizontal scroll and screen aloud`() {
+        assertEquals(IntentCategory.EMAIL_ACTION, intentEngine.classify("Read my email").category)
+        assertEquals(IntentCategory.EMAIL_ACTION, intentEngine.classify("ইমেইল পড়ো").category)
+        assertEquals(IntentCategory.EMAIL_ACTION, intentEngine.classify("Delete this email").category)
+        assertEquals(IntentCategory.SCREEN_INSPECT, intentEngine.classify("Read screen aloud").category)
+        assertEquals(IntentCategory.SCREEN_ACTION, intentEngine.classify("Swipe left").category)
     }
 }

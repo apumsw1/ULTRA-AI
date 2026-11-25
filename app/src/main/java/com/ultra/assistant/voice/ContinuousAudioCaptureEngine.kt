@@ -85,8 +85,8 @@ object VoiceAudioMath {
     ): Float {
         val clampedFloor = noiseFloorRms.coerceIn(60f, 2500f)
         return if (assistantSpeaking) {
-            val minGate = if (echoCancelerActive) 1150f else 1650f
-            val multiplier = if (echoCancelerActive) 3.8f else 4.6f
+            val minGate = if (echoCancelerActive) 1300f else 2200f
+            val multiplier = if (echoCancelerActive) 3.8f else 4.8f
             maxOf(clampedFloor * multiplier, minGate)
         } else {
             maxOf(clampedFloor * 2.5f, 440f)

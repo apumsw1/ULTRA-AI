@@ -84,11 +84,16 @@ class NetworkMonitor(context: Context) {
             }
             @Suppress("DEPRECATION")
             val networks = cm.allNetworks
-            networks.any { net ->
-                if (lostNetwork != null && net == lostNetwork) return@any false
-                val caps = cm.getNetworkCapabilities(net) ?: return@any false
-                hasInternetCaps(caps)
+            if (networks.any { net ->
+                    if (lostNetwork != null && net == lostNetwork) return@any false
+                    val caps = cm.getNetworkCapabilities(net) ?: return@any false
+                    hasInternetCaps(caps)
+                }
+            ) {
+                return@runCatching true
             }
+            @Suppress("DEPRECATION")
+            lostNetwork == null && cm.activeNetworkInfo?.isConnected == true
         }.getOrDefault(false)
     }
 

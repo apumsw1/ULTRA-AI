@@ -15,7 +15,7 @@ import kotlinx.coroutines.flow.map
 private val Context.ultraDataStore: DataStore<Preferences> by preferencesDataStore(name = "ultra_preferences")
 
 enum class AiProviderMode(val label: String) {
-    AUTO("Auto (Cloudflare Worker + Firebase AI Fallback)"),
+    AUTO("Auto (Google AI Studio + Cloudflare Fallback)"),
     FIREBASE_AI("Firebase AI Logic (Gemini)"),
     CLOUDFLARE_WORKER("Cloudflare Worker Gateway")
 }

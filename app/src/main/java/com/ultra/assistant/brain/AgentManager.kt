@@ -472,15 +472,18 @@ class AgentManager(
     }
 
     private fun looksLikeActionRequest(input: String): Boolean {
-        val lower = input.lowercase()
+        val lower = input.lowercase().trim()
+        if (IntentEngine.isAnalyticalOrInformationalQuestion(lower)) {
+            return false
+        }
         return listOf(
             "open ", "launch ", "youtube", "volume", "mute", "flashlight", "torch",
             "bluetooth", "wifi", "wi-fi", "settings", "call ", "dial ", "sms", "message",
             "remind", "notification", "screen", "click", "tap", "scroll", "swipe", "type ", "lock",
-            "search", "battery", "quick settings", "email", "gmail", "read aloud", "next",
+            "search", "battery", "quick settings", "email", "gmail", "read aloud", "next song", "next page",
             "খোলো", "খুলে", "সার্চ", "কল", "ইমেইল", "স্ক্রল", "পড়", "পড়",
             "खोलो", "सर्च", "कॉल", "ईमेल", "स्क्रॉल", "पढ़"
-        ).any { lower.contains(it) }
+        ).any { lower.contains(it) } || lower in setOf("next", "next one", "পরেরটা", "अगला")
     }
 
     suspend fun resolvePendingConfirmation(approved: Boolean): AgentExecutionReport? {

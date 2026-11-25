@@ -270,4 +270,16 @@ class UltraCoreUnitTest {
         assertFalse(com.ultra.assistant.control.UltraAccessibilityService.shouldRefreshPassiveSnapshot(1000L, 1500L))
         assertTrue(com.ultra.assistant.control.UltraAccessibilityService.shouldRefreshPassiveSnapshot(1000L, 2200L))
     }
+
+    @Test
+    fun `analytical questions route to AI brain instead of being hijacked by local action intents`() {
+        assertEquals(IntentCategory.CONVERSATION, intentEngine.classify("How does Bluetooth work?").category)
+        assertEquals(IntentCategory.CONVERSATION, intentEngine.classify("Why do humans love music?").category)
+        assertEquals(IntentCategory.CONVERSATION, intentEngine.classify("Start a business plan for a cafe").category)
+        assertEquals(IntentCategory.CONVERSATION, intentEngine.classify("What is the next step in photosynthesis?").category)
+        assertEquals(IntentCategory.CONVERSATION, intentEngine.classify("কীভাবে ভালো প্রোগ্রামার হওয়া যায়?").category)
+
+        assertEquals(IntentCategory.SCREEN_INSPECT, intentEngine.classify("What's on screen right now").category)
+        assertEquals(IntentCategory.DEVICE_CONTROL, intentEngine.classify("Open Bluetooth settings").category)
+    }
 }

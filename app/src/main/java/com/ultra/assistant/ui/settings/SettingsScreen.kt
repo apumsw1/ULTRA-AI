@@ -202,7 +202,7 @@ fun SettingsScreen(
                             label = {
                                 Text(
                                     when (mode) {
-                                        AiProviderMode.AUTO -> "Auto (Worker + Gemini)"
+                                        AiProviderMode.AUTO -> "Auto (AI Studio + Worker)"
                                         AiProviderMode.FIREBASE_AI -> "Gemini Only"
                                         AiProviderMode.CLOUDFLARE_WORKER -> "Cloudflare"
                                     }

@@ -49,9 +49,9 @@ class ModelRouter(
     // Zero HTTP disk cache to minimize storage usage and preserve strict session privacy.
     private val httpClient = OkHttpClient.Builder()
         .cache(null)
-        .connectTimeout(8, TimeUnit.SECONDS)
-        .readTimeout(25, TimeUnit.SECONDS)
-        .writeTimeout(15, TimeUnit.SECONDS)
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(40, TimeUnit.SECONDS)
+        .writeTimeout(20, TimeUnit.SECONDS)
         .build()
 
     private val _onlineDiagnostic = MutableStateFlow("")
@@ -176,56 +176,58 @@ class ModelRouter(
             return Result.failure(IllegalStateException("Offline"))
         }
         val settings = settingsRepository.settingsFlow.first()
+        val firebaseReady = runCatching { FirebaseApp.getInstance() }.isSuccess
 
-        // 1. Try Cloudflare Worker /api/tts first in AUTO or CLOUDFLARE_WORKER mode
+        // 1. Try Firebase AI neural TTS (gemini-3.1-flash-tts-preview) first in AUTO or FIREBASE_AI mode
+        if (settings.aiProviderMode != AiProviderMode.CLOUDFLARE_WORKER &&
+            firebaseReady &&
+            !firebaseAiRejectedForSession &&
+            !firebaseNeuralTtsRejectedForSession
+        ) {
+            val firebaseTts = try {
+                val model = if (voiceGender == VoiceGender.FEMALE) femaleNeuralTtsModel else maleNeuralTtsModel
+                val prompt = "Read aloud in a warm, natural, human conversational voice matching the script/language ($languageHint): $cleanText"
+                val response = withTimeout(25_000L) {
+                    model.generateContent(prompt)
+                }
+                val pcmBytes = response.candidates
+                    .firstOrNull()
+                    ?.content
+                    ?.parts
+                    ?.filterIsInstance<InlineDataPart>()
+                    ?.firstOrNull()
+                    ?.inlineData
+                if (pcmBytes == null || pcmBytes.isEmpty()) {
+                    Result.failure(IllegalStateException("Empty Gemini TTS audio"))
+                } else {
+                    Result.success(pcmBytes)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (isAuthOrAppCheckError(e)) {
+                    firebaseNeuralTtsRejectedForSession = true
+                }
+                Log.w(TAG, "Gemini neural TTS unavailable, checking fallback", e)
+                Result.failure(IllegalStateException(sanitizeOnlineError(e.localizedMessage ?: "Neural TTS failed")))
+            }
+            if (firebaseTts.isSuccess || settings.aiProviderMode == AiProviderMode.FIREBASE_AI) {
+                return firebaseTts
+            }
+        }
+
+        // 2. Fallback (or direct route in CLOUDFLARE_WORKER mode) to Cloudflare Worker /api/tts
         if (settings.aiProviderMode != AiProviderMode.FIREBASE_AI && !workerTtsUnavailableForSession) {
-            val workerTts = synthesizeViaCloudflareWorker(
+            return synthesizeViaCloudflareWorker(
                 baseUrl = settings.workerEndpoint,
                 authToken = settings.workerAuthToken,
                 text = cleanText,
                 gender = voiceGender,
                 languageHint = languageHint
             )
-            if (workerTts.isSuccess) return workerTts
         }
 
-        // 2. Try Firebase AI neural TTS when allowed and not rejected for session
-        val firebaseReady = runCatching { FirebaseApp.getInstance() }.isSuccess
-        if (settings.aiProviderMode == AiProviderMode.CLOUDFLARE_WORKER ||
-            !firebaseReady ||
-            firebaseAiRejectedForSession ||
-            firebaseNeuralTtsRejectedForSession
-        ) {
-            return Result.failure(IllegalStateException("Neural TTS unavailable"))
-        }
-
-        return try {
-            val model = if (voiceGender == VoiceGender.FEMALE) femaleNeuralTtsModel else maleNeuralTtsModel
-            val prompt = "Read aloud in a warm, natural, human conversational voice matching the script/language ($languageHint): $cleanText"
-            val response = withTimeout(10_000L) {
-                model.generateContent(prompt)
-            }
-            val pcmBytes = response.candidates
-                .firstOrNull()
-                ?.content
-                ?.parts
-                ?.filterIsInstance<InlineDataPart>()
-                ?.firstOrNull()
-                ?.inlineData
-            if (pcmBytes == null || pcmBytes.isEmpty()) {
-                Result.failure(IllegalStateException("Empty Gemini TTS audio"))
-            } else {
-                Result.success(pcmBytes)
-            }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            if (isAuthOrAppCheckError(e)) {
-                firebaseNeuralTtsRejectedForSession = true
-            }
-            Log.w(TAG, "Gemini neural TTS unavailable, falling back cleanly", e)
-            Result.failure(IllegalStateException(sanitizeOnlineError(e.localizedMessage ?: "Neural TTS failed")))
-        }
+        return Result.failure(IllegalStateException("Neural TTS unavailable"))
     }
 
     private suspend fun synthesizeViaCloudflareWorker(
@@ -293,25 +295,24 @@ class ModelRouter(
         val settings = settingsRepository.settingsFlow.first()
         val firebaseReady = runCatching { FirebaseApp.getInstance() }.isSuccess
 
-        // In AUTO or CLOUDFLARE_WORKER, prioritize the configured Cloudflare Worker (/api/transcribe) first
-        if (settings.aiProviderMode != AiProviderMode.FIREBASE_AI) {
-            val workerRes = transcribeViaCloudflareWorker(
+        // In AUTO or FIREBASE_AI, prioritize Firebase AI Logic (Gemini) multilingual transcription first
+        if (settings.aiProviderMode != AiProviderMode.CLOUDFLARE_WORKER &&
+            firebaseReady &&
+            !firebaseAiRejectedForSession
+        ) {
+            val firebaseRes = transcribeViaFirebaseAi(wavBytes, languageHint)
+            if (firebaseRes.isSuccess || settings.aiProviderMode == AiProviderMode.FIREBASE_AI) {
+                return firebaseRes
+            }
+        }
+
+        return if (settings.aiProviderMode != AiProviderMode.FIREBASE_AI) {
+            transcribeViaCloudflareWorker(
                 baseUrl = settings.workerEndpoint,
                 authToken = settings.workerAuthToken,
                 wavBytes = wavBytes,
                 languageHint = languageHint
             )
-            if (workerRes.isSuccess ||
-                settings.aiProviderMode == AiProviderMode.CLOUDFLARE_WORKER ||
-                !firebaseReady ||
-                firebaseAiRejectedForSession
-            ) {
-                return workerRes
-            }
-        }
-
-        return if (firebaseReady && !firebaseAiRejectedForSession) {
-            transcribeViaFirebaseAi(wavBytes, languageHint)
         } else {
             Result.failure(IllegalStateException("Online speech transcription unavailable"))
         }
@@ -322,7 +323,7 @@ class ModelRouter(
         languageHint: String
     ): Result<Pair<String, String>> {
         return try {
-            val response = withTimeout(12_000L) {
+            val response = withTimeout(30_000L) {
                 audioTranscriberModel.generateContent(
                     content {
                         inlineData(wavBytes, "audio/wav")
@@ -525,7 +526,30 @@ Instructions:
                 callFirebaseAiPlanner(effectiveModel, timeoutMs, prompt)
             }
             AiProviderMode.AUTO -> {
-                val workerRes = callCloudflareWorkerAgent(
+                val firebaseReady = runCatching { FirebaseApp.getInstance() }.isSuccess
+                if (firebaseReady && !firebaseAiRejectedForSession) {
+                    val firebaseRes = callFirebaseAiPlanner(effectiveModel, timeoutMs, prompt)
+                    if (firebaseRes.isSuccess) {
+                        return firebaseRes
+                    }
+                    if (networkMonitor != null && !networkMonitor.checkCurrentConnectivity()) {
+                        return firebaseRes
+                    }
+                    return callCloudflareWorkerAgent(
+                        baseUrl = workerUrl,
+                        authToken = workerToken,
+                        effectiveModel = effectiveModel,
+                        userMessage = userMessage,
+                        history = history,
+                        toolCatalogJson = toolCatalogJson,
+                        screenContext = screenContext,
+                        languageLabel = languageLabel
+                    ).recoverCatching { gwErr ->
+                        val fbErr = firebaseRes.exceptionOrNull()?.message ?: "Firebase AI unavailable"
+                        throw IllegalStateException("Online AI unavailable ($fbErr; Worker: ${gwErr.message})")
+                    }
+                }
+                callCloudflareWorkerAgent(
                     baseUrl = workerUrl,
                     authToken = workerToken,
                     effectiveModel = effectiveModel,
@@ -535,19 +559,6 @@ Instructions:
                     screenContext = screenContext,
                     languageLabel = languageLabel
                 )
-                if (workerRes.isSuccess) {
-                    workerRes
-                } else {
-                    if (firebaseAiRejectedForSession ||
-                        (networkMonitor != null && !networkMonitor.checkCurrentConnectivity())
-                    ) {
-                        return workerRes
-                    }
-                    callFirebaseAiPlanner(effectiveModel, timeoutMs, prompt).recoverCatching { aiErr ->
-                        val gwErr = workerRes.exceptionOrNull()?.message ?: "Cloudflare Worker unreachable"
-                        throw IllegalStateException("Online AI temporarily unavailable ($gwErr; Fallback: ${aiErr.message})")
-                    }
-                }
             }
         }
     }
@@ -721,41 +732,42 @@ Instructions:
         val timeoutMs = resolveTimeoutMs(settings.aiSpeedProfile)
         val firebaseReady = runCatching { FirebaseApp.getInstance() }.isSuccess
 
-        // Prioritize Cloudflare Worker in AUTO and CLOUDFLARE_WORKER modes; fall back to Firebase AI in AUTO
-        if (settings.aiProviderMode != AiProviderMode.FIREBASE_AI) {
-            val workerRes = callCloudflareWorkerAgent(
-                baseUrl = settings.workerEndpoint,
-                authToken = settings.workerAuthToken,
-                effectiveModel = effectiveModel,
-                userMessage = prompt,
-                history = history,
-                toolCatalogJson = "[]",
-                screenContext = "",
-                languageLabel = languageLabel
-            )
-            workerRes.fold(
-                onSuccess = { (_, decision) ->
-                    val prefix = if (decision.thoughtSummary.isNotBlank()) "<thought>${decision.thoughtSummary}</thought>" else ""
-                    emit(prefix + decision.directReply)
-                },
-                onFailure = { err ->
-                    if (settings.aiProviderMode == AiProviderMode.AUTO &&
-                        firebaseReady &&
-                        !firebaseAiRejectedForSession
-                    ) {
-                        streamFromGemini(effectiveModel, timeoutMs, prompt, history, languageLabel).collect { emit(it) }
-                    } else {
-                        throw err
-                    }
+        // Prioritize Firebase AI Logic (Google AI Studio Gemini Brain) in AUTO and FIREBASE_AI; fall back to Cloudflare Worker in AUTO
+        if (settings.aiProviderMode != AiProviderMode.CLOUDFLARE_WORKER &&
+            firebaseReady &&
+            !firebaseAiRejectedForSession
+        ) {
+            try {
+                streamFromGemini(effectiveModel, timeoutMs, prompt, history, languageLabel).collect { emit(it) }
+                return@flow
+            } catch (e: Exception) {
+                if (e is CancellationException && e !is TimeoutCancellationException) throw e
+                if (settings.aiProviderMode == AiProviderMode.FIREBASE_AI) {
+                    throw e
                 }
-            )
-            return@flow
-        }
-
-        if (!firebaseReady) {
+                Log.w(TAG, "Primary Gemini stream failed, failing over to Cloudflare Worker", e)
+            }
+        } else if (settings.aiProviderMode == AiProviderMode.FIREBASE_AI) {
             throw IllegalStateException("Firebase AI not initialized")
         }
-        streamFromGemini(effectiveModel, timeoutMs, prompt, history, languageLabel).collect { emit(it) }
+
+        val workerRes = callCloudflareWorkerAgent(
+            baseUrl = settings.workerEndpoint,
+            authToken = settings.workerAuthToken,
+            effectiveModel = effectiveModel,
+            userMessage = prompt,
+            history = history,
+            toolCatalogJson = "[]",
+            screenContext = "",
+            languageLabel = languageLabel
+        )
+        workerRes.fold(
+            onSuccess = { (_, decision) ->
+                val prefix = if (decision.thoughtSummary.isNotBlank()) "<thought>${decision.thoughtSummary}</thought>" else ""
+                emit(prefix + decision.directReply)
+            },
+            onFailure = { err -> throw err }
+        )
     }
 
     private fun streamFromGemini(
@@ -801,9 +813,9 @@ Instructions:
     }
 
     private fun resolveTimeoutMs(profile: AiSpeedProfile): Long = when (profile) {
-        AiSpeedProfile.TURBO -> 18_000L
-        AiSpeedProfile.BALANCED -> 25_000L
-        AiSpeedProfile.DEEP_THINK -> 35_000L
+        AiSpeedProfile.TURBO -> 35_000L
+        AiSpeedProfile.BALANCED -> 45_000L
+        AiSpeedProfile.DEEP_THINK -> 60_000L
     }
 
     private fun parseWorkerError(code: Int, rawBody: String): String {

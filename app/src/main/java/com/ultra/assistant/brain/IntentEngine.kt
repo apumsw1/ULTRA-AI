@@ -18,6 +18,12 @@ class IntentEngine {
             ) -> IntentCategory.EMAIL_ACTION
             containsAny(
                 norm,
+                "read screen", "read aloud", "what's on screen", "whats on screen", "what is on screen", "inspect screen",
+                "স্ক্রিন দেখ", "স্ক্রিন পড়", "স্ক্রিন পড়", "স্ক্রিন পড়ে শোনাও", "स्क्रीन देखो", "स्क्रीन पढ़ो"
+            ) -> IntentCategory.SCREEN_INSPECT
+            isAnalyticalOrInformationalQuestion(norm) -> IntentCategory.CONVERSATION
+            containsAny(
+                norm,
                 "lock phone", "lock screen", "ফোন লক", "ডিভাইস তথ্য", "device info",
                 "wifi", "wi-fi", "bluetooth", "ওয়াইফাই", "ব্লুটুথ", "brightness",
                 "display settings", "network settings", "sound settings",
@@ -39,16 +45,13 @@ class IntentEngine {
                 IntentCategory.SMS_PREPARE
             containsAny(norm, "remind", "reminder", "রিমাইন্ডার", "মনে করিয়ে", "रिमाइंडर") ->
                 IntentCategory.REMINDER
-            containsAny(
-                norm,
-                "read screen", "read aloud", "what's on screen", "inspect screen",
-                "স্ক্রিন দেখ", "স্ক্রিন পড়", "স্ক্রিন পড়", "স্ক্রিন পড়ে শোনাও", "स्क्रीन देखो", "स्क्रीन पढ़ो"
-            ) -> IntentCategory.SCREEN_INSPECT
-            containsAny(
-                norm,
-                "click ", "tap ", "type ", "scroll", "swipe ", "go back", "press back", "go home",
-                "home screen", "recent apps", "next", "ক্লিক", "টাইপ", "ব্যাক", "স্ক্রল", "হোম", "পরের", "स्क्रॉल", "होम", "बैक", "अगला"
-            ) -> IntentCategory.SCREEN_ACTION
+            norm.trim().lowercase() in setOf("next", "next one", "পরের", "পরেরটা", "अगला") ||
+                containsAny(
+                    norm,
+                    "click ", "tap ", "type ", "scroll", "swipe ", "go back", "press back", "go home",
+                    "home screen", "recent apps", "next page", "next video", "next slide", "go next",
+                    "ক্লিক", "টাইপ", "ব্যাক", "স্ক্রল", "হোম", "পরেরটা", "स्क्रॉल", "होम", "बैक"
+                ) -> IntentCategory.SCREEN_ACTION
             containsAny(norm, "remember that", "মনে রাখ", "याद रखना", "याद रखो") ->
                 IntentCategory.MEMORY_SAVE
             containsAny(norm, "search youtube", "youtube for", "ইউটিউবে সার্চ", "ইউটিউব সার্চ", "यूट्यूब पर खोजो", "यूट्यूब सर्च") ->
@@ -139,6 +142,26 @@ class IntentEngine {
                 s = s.replace(pattern, replacement)
             }
             return s
+        }
+
+        fun isAnalyticalOrInformationalQuestion(norm: String): Boolean {
+            val trimmed = norm.trim().lowercase()
+            if (trimmed.isBlank() || isCompoundAction(trimmed)) return false
+            val explicitInspectOrInbox = trimmed.contains("on screen") ||
+                trimmed.contains("my notification") ||
+                trimmed.contains("unread notification") ||
+                trimmed.contains("check notification")
+            if (explicitInspectOrInbox) return false
+            return listOf(
+                "how to ", "how do ", "how does ", "how did ", "how can ", "how is ", "how are ",
+                "how many ", "how much ", "why ", "explain ", "describe ", "tell me about ",
+                "what is ", "what are ", "what does ", "what's ", "whats ", "who is ", "who was ",
+                "when did ", "when was ", "where is ", "compare ", "difference between ",
+                "write a ", "write an ", "write me ", "write code", "summarize ", "translate ",
+                "create a plan", "help me understand", "start a business", "start writing",
+                "কীভাবে ", "কিভাবে ", "কেন ", "ব্যাখ্যা ", "সম্পর্কে ", "লিখে দাও", "অর্থ কী", "বলো তো",
+                "कैसे ", "क्यों ", "समझाओ", "बताओ", "के बारे में", "लिखो"
+            ).any { trimmed.startsWith(it) || trimmed.contains(" $it") }
         }
 
         fun isCompoundAction(input: String): Boolean {

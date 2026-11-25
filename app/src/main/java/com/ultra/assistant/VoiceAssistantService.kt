@@ -583,8 +583,14 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
         runCatching { offlineRecognizer?.destroy() }
         offlineRecognizer = runCatching { SpeechRecognizer.createSpeechRecognizer(this) }.getOrNull()
         val recognizer = offlineRecognizer ?: run {
-            captureEngine?.resumeAfterOfflineRecognizer()
-            sendVoiceState(if (preferOffline) "OFFLINE" else "LISTENING")
+            aiRequestInProgress = false
+            captureEngine?.processingTurn = false
+            if (isRunning && !destroyed && isSessionListening && !singleTurnOnly) {
+                captureEngine?.resumeAfterOfflineRecognizer()
+                sendVoiceState(if (isEffectiveOffline()) "OFFLINE" else "LISTENING")
+            } else {
+                sendVoiceState("IDLE")
+            }
             return
         }
 
@@ -662,7 +668,14 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
         }.onFailure {
             runCatching { recognizer.destroy() }
             offlineRecognizer = null
-            if (isSessionListening) captureEngine?.resumeAfterOfflineRecognizer()
+            aiRequestInProgress = false
+            captureEngine?.processingTurn = false
+            if (isRunning && !destroyed && isSessionListening && !singleTurnOnly) {
+                captureEngine?.resumeAfterOfflineRecognizer()
+                sendVoiceState(if (isEffectiveOffline()) "OFFLINE" else "LISTENING")
+            } else {
+                sendVoiceState("IDLE")
+            }
         }
     }
 
